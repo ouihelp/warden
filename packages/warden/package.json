@@ -52,6 +52,8 @@
     "@earendil-works/pi-coding-agent": "^0.84.3",
     "@inquirer/select": "^5.1.5",
     "@octokit/rest": "^22.0.1",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
+    "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@sentry/core": "^10.71.0",
     "@sentry/dotagents-lib": "^1.17.0",
     "@sentry/node": "^10.71.0",

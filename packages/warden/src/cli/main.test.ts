@@ -591,6 +591,12 @@ prompt: |-
 });
 
 describe('formatSkillSource', () => {
+  it('recognizes built-in skills from the Ouihelp package', () => {
+    expect(formatSkillSource({
+      rootDir: '/repo/node_modules/@ouihelp/warden/dist/builtin-skills/security-review',
+    })).toBe('built-in (@sentry/warden)');
+  });
+
   it('formats repo-local skill sources relative to the repo root', () => {
     expect(formatSkillSource(
       { rootDir: '/repo/.agents/skills/security-review' },
