@@ -748,7 +748,7 @@ describe('analyzeFile', () => {
       maxConsecutiveProviderFailures: 2,
       abortController: controller,
     });
-    const runSkill = vi.fn(async () => {
+    const runSkill = vi.fn(async (_request: SkillRunRequest) => {
       throw new APIError(
         529,
         { error: { type: 'overloaded_error', message: 'overloaded' } },
@@ -786,6 +786,11 @@ describe('analyzeFile', () => {
     );
 
     expect(runSkill).toHaveBeenCalledTimes(3);
+    expect(runSkill.mock.calls.map(([request]) => request.options)).toEqual([
+      expect.objectContaining({ attempt: 1, maxAttempts: 3 }),
+      expect.objectContaining({ attempt: 2, maxAttempts: 3 }),
+      expect.objectContaining({ attempt: 3, maxAttempts: 3 }),
+    ]);
     expect(controller.signal.aborted).toBe(false);
     expect(circuitBreaker.reason).toBeUndefined();
     expect(result.failedHunks).toBe(1);

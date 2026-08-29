@@ -35,6 +35,10 @@ export interface SkillRunOptions {
   model?: string;
   effort?: Effort;
   abortController?: AbortController;
+  /** One-based Warden orchestration attempt for this model-backed skill run. */
+  attempt?: number;
+  /** Total Warden orchestration attempts allowed for this hunk. */
+  maxAttempts?: number;
 }
 
 export interface SkillRunRequest {
