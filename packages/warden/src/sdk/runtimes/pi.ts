@@ -994,7 +994,7 @@ export const piRuntime: Runtime = {
       tools,
       allowMutatingTools,
     } = request;
-    const { maxTurns = 50, model, effort, abortController } = options;
+    const { maxTurns = 50, model, effort, abortController, attempt, maxAttempts } = options;
     const skillTools = resolvePiSkillTools(tools, allowMutatingTools);
 
     return startTracedSpan(
@@ -1008,6 +1008,8 @@ export const piRuntime: Runtime = {
           'gen_ai.agent.name': skillName,
           ...(model ? { 'gen_ai.request.model': model } : {}),
           'warden.request.max_turns': maxTurns,
+          ...(attempt ? { 'warden.retry.attempt': attempt } : {}),
+          ...(maxAttempts ? { 'warden.retry.max_attempts': maxAttempts } : {}),
         },
       },
       async (span) => {

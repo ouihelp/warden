@@ -434,6 +434,8 @@ async function analyzeHunk(
               model: options.model,
               effort: options.effort,
               abortController: options.abortController,
+              attempt: attempt + 1,
+              maxAttempts: retryConfig.maxRetries + 1,
             },
             providerOptions: getRuntimeProviderOptions(runtimeName, {
               pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable,

@@ -366,7 +366,7 @@ export const claudeRuntime: Runtime = {
       tools,
       allowMutatingTools,
     } = request;
-    const { maxTurns = 50, model, effort, abortController } = options;
+    const { maxTurns = 50, model, effort, abortController, attempt, maxAttempts } = options;
     const { pathToClaudeCodeExecutable } = getClaudeProviderOptions(providerOptions);
     const skillTools = resolveClaudeSkillTools(tools, allowMutatingTools);
 
@@ -381,6 +381,8 @@ export const claudeRuntime: Runtime = {
           'gen_ai.agent.name': skillName,
           ...(model ? { 'gen_ai.request.model': model } : {}),
           'warden.request.max_turns': maxTurns,
+          ...(attempt ? { 'warden.retry.attempt': attempt } : {}),
+          ...(maxAttempts ? { 'warden.retry.max_attempts': maxAttempts } : {}),
         },
       },
       async (span) => {

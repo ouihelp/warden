@@ -384,6 +384,8 @@ describe('claudeRuntime.runSkill', () => {
         traceRecorder,
         options: {
           model: 'claude-test',
+          attempt: 2,
+          maxAttempts: 3,
         },
       });
       spans = traceRecorder?.snapshot();
@@ -393,6 +395,10 @@ describe('claudeRuntime.runSkill', () => {
       expect.objectContaining({
         op: 'gen_ai.invoke_agent',
         name: 'invoke_agent test-skill',
+        attributes: expect.objectContaining({
+          'warden.retry.attempt': 2,
+          'warden.retry.max_attempts': 3,
+        }),
       }),
       expect.objectContaining({
         op: 'gen_ai.chat',

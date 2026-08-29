@@ -385,11 +385,26 @@ describe('piRuntime.runSkill', () => {
     let spans: TraceSpan[] | undefined;
     await Sentry.startSpan({ op: 'test', name: 'parent' }, async (span) => {
       const recorder = startTraceRecorder(span);
-      await withTraceRecorder(recorder, () => piRuntime.runSkill(baseSkillRequest()));
+      await withTraceRecorder(recorder, () => piRuntime.runSkill({
+        ...baseSkillRequest(),
+        options: {
+          ...baseSkillRequest().options,
+          attempt: 2,
+          maxAttempts: 3,
+        },
+      }));
       spans = recorder?.snapshot();
     });
 
     expect(spans).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        op: 'gen_ai.invoke_agent',
+        name: 'invoke_agent test-skill',
+        attributes: expect.objectContaining({
+          'warden.retry.attempt': 2,
+          'warden.retry.max_attempts': 3,
+        }),
+      }),
       expect.objectContaining({
         op: 'gen_ai.execute_tool',
         name: 'execute_tool read',
