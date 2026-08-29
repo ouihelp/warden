@@ -65,6 +65,7 @@ describe('runAction without telemetry', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     delete process.env['WARDEN_SENTRY_DSN'];
+    delete process.env['WARDEN_TRACEPARENT'];
     await Sentry.close(0);
     process.env['GITHUB_EVENT_NAME'] = 'schedule';
     process.env['GITHUB_EVENT_PATH'] = '/tmp/event.json';
@@ -115,12 +116,32 @@ describe('runAction', () => {
     process.env['GITHUB_WORKSPACE'] = '/tmp/workspace';
     process.env['GITHUB_REPOSITORY'] = 'getsentry/warden';
     process.env['GITHUB_RUN_ID'] = '12345';
+    delete process.env['WARDEN_TRACEPARENT'];
     mocks.parseActionInputs.mockReturnValue({ ...baseInputs });
   });
 
   afterAll(async () => {
     delete process.env['WARDEN_SENTRY_DSN'];
+    delete process.env['WARDEN_TRACEPARENT'];
     await Sentry.close(0);
+  });
+
+  it('continues the upstream trace for the action root span', async () => {
+    const traceId = '1dace4abdf5207d4457bdd407b2fe2ef';
+    const parentSpanId = 'fe2f62eeecf881d0';
+    process.env['WARDEN_TRACEPARENT'] = `00-${traceId}-${parentSpanId}-01`;
+
+    await runAction();
+    await Sentry.flush(1000);
+
+    expect(capturedTransactions).toContainEqual(
+      expect.objectContaining({
+        transaction: 'run Warden action',
+        contexts: expect.objectContaining({
+          trace: expect.objectContaining({ trace_id: traceId, parent_span_id: parentSpanId }),
+        }),
+      }),
+    );
   });
 
   it.each(['analyze', 'report'] as const)(

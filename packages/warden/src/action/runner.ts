@@ -18,8 +18,7 @@ function isPullRequestEvent(eventName: string): boolean {
   return eventName === 'pull_request';
 }
 
-/** Run the GitHub Action dispatcher once. */
-export async function runAction(): Promise<void> {
+async function runActionSpan(): Promise<void> {
   const eventName = process.env['GITHUB_EVENT_NAME'];
   const actionAttributes = setGitHubActionScope(eventName);
 
@@ -79,5 +78,31 @@ export async function runAction(): Promise<void> {
         throw error;
       }
     }
+  );
+}
+
+function sentryTraceFromTraceparent(traceparent: string | undefined): string | undefined {
+  const match = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/.exec(traceparent ?? '');
+  if (!match) return undefined;
+
+  const traceId = match[1];
+  const parentSpanId = match[2];
+  const traceFlags = match[3];
+  if (!traceId || !parentSpanId || !traceFlags) return undefined;
+
+  if (/^0+$/.test(traceId) || /^0+$/.test(parentSpanId)) return undefined;
+
+  const sampled = (Number.parseInt(traceFlags, 16) & 1) === 1 ? '1' : '0';
+  return `${traceId}-${parentSpanId}-${sampled}`;
+}
+
+/** Run the GitHub Action dispatcher once, continuing an optional W3C trace context. */
+export async function runAction(): Promise<void> {
+  const sentryTrace = sentryTraceFromTraceparent(process.env['WARDEN_TRACEPARENT']);
+  if (!sentryTrace) return runActionSpan();
+
+  return Sentry.continueTrace(
+    { sentryTrace, baggage: undefined },
+    () => runActionSpan(),
   );
 }

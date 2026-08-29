@@ -12,6 +12,8 @@ import {
 
 function clearTelemetryEnv(): void {
   delete process.env['WARDEN_SENTRY_DSN'];
+  delete process.env['OTEL_TRACES_EXPORTER'];
+  delete process.env['OTEL_SDK_DISABLED'];
   delete process.env['GITHUB_REPOSITORY'];
   delete process.env['GITHUB_RUN_ID'];
   delete process.env['GITHUB_SERVER_URL'];
@@ -23,6 +25,14 @@ function clearTelemetryEnv(): void {
 }
 
 const transportFlush = vi.fn(async () => true);
+const spanProcessorForceFlush = vi.fn(async () => undefined);
+const spanProcessorOnEnd = vi.fn((_span: unknown) => undefined);
+const testSpanProcessor = {
+  forceFlush: spanProcessorForceFlush,
+  onEnd: spanProcessorOnEnd,
+  onStart: vi.fn(),
+  shutdown: vi.fn(async () => undefined),
+};
 
 function spyOnClientEmit() {
   const client = Sentry.getClient();
@@ -34,6 +44,7 @@ describe('sentry telemetry scope', () => {
   beforeAll(() => {
     process.env['WARDEN_SENTRY_DSN'] = 'https://public@example.com/1';
     initSentry('action', {
+      openTelemetrySpanProcessors: [testSpanProcessor],
       transport: () => ({
         send: async () => ({}),
         flush: transportFlush,
@@ -58,10 +69,41 @@ describe('sentry telemetry scope', () => {
   });
 
   it('allows 30 seconds to flush pending telemetry and returns the result', async () => {
+    spanProcessorForceFlush.mockClear();
     transportFlush.mockResolvedValueOnce(false);
 
     await expect(flushSentry()).resolves.toBe(false);
     expect(transportFlush).toHaveBeenCalledWith(30_000);
+    expect(spanProcessorForceFlush).toHaveBeenCalledOnce();
+  });
+
+  it('fans out the existing parent-child span hierarchy', async () => {
+    spanProcessorOnEnd.mockClear();
+
+    await Sentry.startSpan({ name: 'run Warden action', op: 'cicd.workflow' }, async () => {
+      await Sentry.startSpan(
+        {
+          name: 'chat correctness',
+          op: 'gen_ai.chat',
+          attributes: { 'gen_ai.operation.name': 'chat' },
+        },
+        async () => undefined,
+      );
+    });
+
+    interface EndedSpan {
+      attributes: Record<string, unknown>;
+      name: string;
+      parentSpanContext?: { spanId: string };
+      spanContext(): { spanId: string; traceId: string };
+    }
+    const [child, root] = spanProcessorOnEnd.mock.calls.map(([span]) => span as EndedSpan);
+
+    expect(child?.name).toBe('chat correctness');
+    expect(child?.attributes['gen_ai.operation.name']).toBe('chat');
+    expect(root?.name).toBe('run Warden action');
+    expect(child?.spanContext().traceId).toBe(root?.spanContext().traceId);
+    expect(child?.parentSpanContext?.spanId).toBe(root?.spanContext().spanId);
   });
 
   it('uses the GitHub Actions server URL for repository and run URLs', async () => {

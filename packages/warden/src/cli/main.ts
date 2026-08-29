@@ -673,6 +673,8 @@ function isBuiltinSkillRoot(rootDir: string, repoPath?: string): boolean {
   if (
     normalizedRoot.includes('/node_modules/@sentry/warden/src/builtin-skills/')
     || normalizedRoot.includes('/node_modules/@sentry/warden/dist/builtin-skills/')
+    || normalizedRoot.includes('/node_modules/@ouihelp/warden/src/builtin-skills/')
+    || normalizedRoot.includes('/node_modules/@ouihelp/warden/dist/builtin-skills/')
   ) {
     return true;
   }

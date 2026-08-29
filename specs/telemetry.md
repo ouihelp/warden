@@ -1,6 +1,10 @@
 # Telemetry
 
-Observability via Sentry: tracing, error context, and business metrics. All telemetry is opt-in via `WARDEN_SENTRY_DSN`. When unset, every Sentry call is a no-op.
+Observability uses Sentry for tracing, error context, logs, and business
+metrics. It can also export Warden's OpenTelemetry span tree to any OTLP/HTTP
+backend. Both destinations are opt-in and independent: Sentry uses
+`WARDEN_SENTRY_DSN`, while OTLP export uses the standard OpenTelemetry
+environment variables.
 
 ### Canonical references
 
@@ -25,6 +29,27 @@ Observability via Sentry: tracing, error context, and business metrics. All tele
 | `environment` | `github-action` or `cli` |
 | `tracesSampleRate` | `1.0` (every transaction traced) |
 | `enableLogs` | `true` (structured Sentry logs) |
+
+When `OTEL_TRACES_EXPORTER` contains `otlp`, `initSentry()` adds a standard
+`BatchSpanProcessor` and `OTLPTraceExporter` to Sentry's OpenTelemetry tracer
+provider. This fans out the existing recording spans without creating a second
+Warden trace model. The exporter reads endpoint, headers, timeout, compression,
+resource, and service configuration from standard `OTEL_*` variables.
+`flushSentry()` also flushes this processor at process shutdown.
+
+The exported GenAI attributes include the content already recorded by Warden's
+manual instrumentation: prompts, proprietary code, model outputs, and tool
+arguments/results. The destination must be treated as code-sensitive storage.
+
+| OTLP setting | Value |
+|--------------|-------|
+| `OTEL_TRACES_EXPORTER` | Must contain `otlp` to enable export |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Optional base OTLP/HTTP endpoint |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Optional signal-specific traces endpoint |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Optional shared request headers |
+| `OTEL_EXPORTER_OTLP_TRACES_HEADERS` | Optional signal-specific request headers |
+| `OTEL_SDK_DISABLED` | `true` disables the processor even if `otlp` is selected |
+| `WARDEN_TRACEPARENT` | Optional W3C context (`00-<32-hex trace ID>-<16-hex parent span ID>-<2-hex flags>`); the Action root becomes a child of that observation |
 
 ### Global Attributes
 

@@ -5,12 +5,13 @@ import { SEVERITY_ORDER } from './types/index.js';
 import { getVersion } from './utils/index.js';
 import { genAiProviderName } from './sdk/otel.js';
 import { estimateUsageCostBreakdown } from './sdk/pricing.js';
+import { createOtlpSpanProcessor } from './otlp.js';
 
 export type SentryContext = 'cli' | 'action';
 
 type SentryInitOptions = Pick<
   NodeOptions,
-  'beforeSend' | 'beforeSendTransaction' | 'transport'
+  'beforeSend' | 'beforeSendTransaction' | 'openTelemetrySpanProcessors' | 'transport'
 >;
 
 let initialized = false;
@@ -42,8 +43,16 @@ function repositoryAttributes(repository: string): TelemetryAttributes {
 
 /** Initialize production telemetry, with optional SDK hooks for local observation. */
 export function initSentry(context: SentryContext, options: SentryInitOptions = {}): void {
+  if (initialized) return;
+
   const dsn = process.env['WARDEN_SENTRY_DSN'];
-  if (!dsn || initialized) return;
+  const otlpSpanProcessor = createOtlpSpanProcessor();
+  const { openTelemetrySpanProcessors = [], ...sentryOptions } = options;
+  const spanProcessors = [
+    ...openTelemetrySpanProcessors,
+    ...(otlpSpanProcessor ? [otlpSpanProcessor] : []),
+  ];
+  if (!dsn && spanProcessors.length === 0) return;
   initialized = true;
 
   Sentry.init({
@@ -52,7 +61,8 @@ export function initSentry(context: SentryContext, options: SentryInitOptions = 
     environment: context === 'action' ? 'github-action' : 'cli',
     tracesSampleRate: 1.0,
     enableLogs: true,
-    ...options,
+    ...sentryOptions,
+    ...(spanProcessors.length > 0 ? { openTelemetrySpanProcessors: spanProcessors } : {}),
     integrations: [
       Sentry.consoleLoggingIntegration({ levels: ['warn', 'error'] }),
       Sentry.anthropicAIIntegration({ recordInputs: true, recordOutputs: true }),
@@ -421,7 +431,7 @@ export function emitStaleResolutionMetric(count: number, skill?: string): void {
 }
 
 /**
- * Flush pending Sentry events. Safe to call even if Sentry is not initialized.
+ * Flush pending telemetry. Safe to call even if no exporter is initialized.
  */
 export async function flushSentry(timeoutMs = 30_000): Promise<boolean> {
   if (!initialized) return true;
