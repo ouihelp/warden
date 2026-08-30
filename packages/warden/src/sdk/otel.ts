@@ -70,6 +70,7 @@ export function genAiUsageAttributes(usage: UsageStats): GenAiUsageAttributes {
     'gen_ai.usage.output_tokens': usage.outputTokens,
     'gen_ai.usage.cache_read.input_tokens': usage.cacheReadInputTokens ?? 0,
     'gen_ai.usage.cache_creation.input_tokens': usage.cacheCreationInputTokens ?? 0,
+    ...(usage.costUSD > 0 ? { 'gen_ai.usage.cost': usage.costUSD } : {}),
   };
 }
 
@@ -130,6 +131,26 @@ export function genAiToolCallAttributes(args: {
 /** Set GenAI token usage attributes expected by Sentry AI monitoring. */
 export function setGenAiUsageAttrs(span: SpanLike, usage: UsageStats): void {
   for (const [key, value] of Object.entries(genAiUsageAttributes(usage))) {
+    span.setAttribute(key, value);
+  }
+}
+
+/**
+ * Preserve roll-up usage on an agent without making it look like another
+ * physical model call. Standard `gen_ai.usage.*` attributes belong on the
+ * child model-call spans when a runtime can emit them.
+ */
+export function setGenAiAggregateUsageAttrs(span: SpanLike, usage: UsageStats): void {
+  const attributes: Record<string, string | number | boolean> = {
+    'warden.usage.scope': 'agent',
+    'warden.usage.billable': false,
+    'warden.usage.input_tokens': usage.inputTokens,
+    'warden.usage.output_tokens': usage.outputTokens,
+    'warden.usage.cache_read.input_tokens': usage.cacheReadInputTokens ?? 0,
+    'warden.usage.cache_creation.input_tokens': usage.cacheCreationInputTokens ?? 0,
+    'warden.usage.cost_usd': usage.costUSD,
+  };
+  for (const [key, value] of Object.entries(attributes)) {
     span.setAttribute(key, value);
   }
 }

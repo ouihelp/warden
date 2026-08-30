@@ -152,8 +152,9 @@ function emitSuccessfulRun(message = assistantMessage()): void {
   if (!listener) {
     throw new Error('Pi session listener was not registered');
   }
-  listener({ type: 'turn_end', message, toolResults: [] });
+  listener({ type: 'turn_start' });
   listener({ type: 'message_end', message });
+  listener({ type: 'turn_end', message, toolResults: [] });
   listener({ type: 'agent_end', messages: [message] });
 }
 
@@ -349,6 +350,52 @@ describe('piRuntime.runSkill', () => {
         costUSD: 0.033,
       },
     });
+  });
+
+  it('records one real-duration billable model call and a non-billable agent roll-up', async () => {
+    piMocks.session.prompt.mockImplementation(async () => {
+      const listener = piMocks.listeners[0];
+      if (!listener) {
+        throw new Error('Pi session listener was not registered');
+      }
+      const message = assistantMessage();
+      listener({ type: 'turn_start' });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      listener({ type: 'message_end', message });
+      listener({ type: 'turn_end', message, toolResults: [] });
+      listener({ type: 'agent_end', messages: [message] });
+    });
+
+    let spans: TraceSpan[] = [];
+    await Sentry.startSpan({ op: 'test', name: 'parent' }, async (span) => {
+      const recorder = startTraceRecorder(span);
+      await withTraceRecorder(recorder, () => piRuntime.runSkill(baseSkillRequest()));
+      spans = recorder?.snapshot() ?? [];
+    });
+
+    const agentSpan = spans.find((span) => span.op === 'gen_ai.invoke_agent');
+    const chatSpans = spans.filter((span) => span.op === 'gen_ai.chat');
+    expect(chatSpans).toHaveLength(1);
+    expect(chatSpans[0]).toMatchObject({
+      name: 'chat',
+      parentSpanId: agentSpan?.spanId,
+      attributes: expect.objectContaining({
+        'gen_ai.request.model': 'openai/gpt-test',
+        'gen_ai.response.model': 'gpt-test-2026',
+        'gen_ai.usage.input_tokens': 13,
+        'gen_ai.usage.output_tokens': 5,
+        'gen_ai.usage.cost': 0.033,
+      }),
+    });
+    expect(chatSpans[0]?.durationMs ?? 0).toBeGreaterThan(0);
+    expect(agentSpan?.attributes).toMatchObject({
+      'warden.usage.billable': false,
+      'warden.usage.input_tokens': 13,
+      'warden.usage.output_tokens': 5,
+      'warden.usage.cost_usd': 0.033,
+    });
+    expect(agentSpan?.attributes).not.toHaveProperty('gen_ai.usage.cost');
+    expect(agentSpan?.attributes).not.toHaveProperty('gen_ai.usage.input_tokens');
   });
 
   it('records Pi tool execution spans when trace capture is active', async () => {
