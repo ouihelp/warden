@@ -25,10 +25,10 @@ import {
   type Model,
   type TSchema,
   type TextContent,
-  type ToolResultMessage,
   type Usage,
 } from '@earendil-works/pi-ai';
 import type { Span } from '@sentry/node';
+import { SPAN_STATUS_ERROR, SPAN_STATUS_OK } from '@sentry/core';
 import { z } from 'zod';
 import type { Effort, ToolConfig, ToolName } from '../../config/schema.js';
 import { Sentry } from '../../sentry.js';
@@ -42,7 +42,7 @@ import {
   genAiSpanName,
   genAiToolCallAttributes,
   genAiProviderName,
-  genAiUsageAttributes,
+  setGenAiAggregateUsageAttrs,
   setGenAiInputMessagesAttr,
   setGenAiOutputMessagesAttr,
   setGenAiOutputMessagesAttrFromMessages,
@@ -106,6 +106,7 @@ interface PiPromptResult {
   sessionId?: string;
   durationMs: number;
   numTurns: number;
+  physicalCallSpans: number;
   hitMaxTurns: boolean;
   warnings: string[];
 }
@@ -594,6 +595,10 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
   let hitMaxTurns = false;
   const startedAt = Date.now();
   const activeToolSpans = new Map<string, PiToolSpan>();
+  let activeModelSpan: PiToolSpan | undefined;
+  let modelCallIndex = 0;
+  let physicalCallSpans = 0;
+  let openModelErrorType = 'incomplete_response';
   const conversationMessages: GenAiMessage[] = [{ role: 'user', content: options.userPrompt }];
   // Pi uses cwd for path resolution but does not treat it as a filesystem boundary.
   // Same-name custom tools override its built-ins, so file access stays in the checkout.
@@ -685,45 +690,78 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
     activeToolSpans.clear();
   }
 
-  function recordTurnSpan(
-    message: AssistantMessage,
-    toolResults: ToolResultMessage[] | undefined,
-  ): void {
+  function startModelSpan(): void {
+    finishOpenModelSpan('incomplete_response');
+    modelCallIndex++;
+
+    try {
+      const parentSpan = options.parentSpan ?? Sentry.getActiveSpan();
+      activeModelSpan = startInactiveTracedSpan({
+        op: 'gen_ai.chat',
+        name: 'chat',
+        ...(parentSpan ? { parentSpan } : {}),
+        attributes: {
+          'gen_ai.operation.name': 'chat',
+          'gen_ai.provider.name': genAiProviderName('pi', options.model),
+          ...(options.agentName ? { 'gen_ai.agent.name': options.agentName } : {}),
+          ...(options.model ? { 'gen_ai.request.model': options.model } : {}),
+          'warden.model.call_index': modelCallIndex,
+        },
+      });
+      setGenAiInputMessagesAttr(activeModelSpan, [...conversationMessages]);
+    } catch {
+      activeModelSpan = undefined;
+    }
+  }
+
+  function finishModelSpan(message: AssistantMessage): void {
+    const span = activeModelSpan;
+    activeModelSpan = undefined;
+    if (!span) return;
+
     const outputMessage: GenAiMessage = {
       role: message.role,
       content: message.content,
       finishReason: message.stopReason,
     };
-    const followUpMessages = toolResults ?? [];
-    const requestModel = options.model ?? message.model ?? message.responseModel;
 
     try {
-      const usageAttrs = genAiUsageAttributes(piUsageToStats(message.usage));
-      startTracedSpan(
-        {
-          op: 'gen_ai.chat',
-          name: genAiSpanName('chat', requestModel),
-          ...(options.parentSpan ? { parentSpan: options.parentSpan } : {}),
-          attributes: {
-            'gen_ai.operation.name': 'chat',
-            'gen_ai.provider.name': message.provider ?? genAiProviderName('pi', options.model),
-            ...(options.agentName ? { 'gen_ai.agent.name': options.agentName } : {}),
-            ...(requestModel ? { 'gen_ai.request.model': requestModel } : {}),
-            'gen_ai.response.model': message.responseModel ?? message.model,
-            ...usageAttrs,
-          },
-        },
-        (span) => {
-          setGenAiInputMessagesAttr(span, conversationMessages);
-          setGenAiOutputMessagesAttrFromMessages(span, [outputMessage]);
-        },
-        options.traceRecorder,
-      );
+      span.setAttribute('gen_ai.provider.name', message.provider ?? genAiProviderName('pi', options.model));
+      span.setAttribute('gen_ai.response.model', message.responseModel ?? message.model);
+      if (message.responseId) {
+        span.setAttribute('gen_ai.response.id', message.responseId);
+      }
+      setGenAiUsageAttrs(span, piUsageToStats(message.usage));
+      setGenAiOutputMessagesAttrFromMessages(span, [outputMessage]);
+      span.setAttribute('gen_ai.response.finish_reasons', [message.stopReason]);
+      if (message.stopReason === 'error' || message.stopReason === 'aborted') {
+        const errorType = message.stopReason === 'error' ? 'provider_error' : 'aborted';
+        span.setAttribute('error.type', errorType);
+        span.setStatus({ code: SPAN_STATUS_ERROR, message: errorType });
+      } else {
+        span.setStatus({ code: SPAN_STATUS_OK });
+      }
+      span.end();
+      recordTracedSpan(span, options.traceRecorder);
+      physicalCallSpans++;
     } catch {
       // Telemetry should never break the workflow.
     }
+  }
 
-    conversationMessages.push(outputMessage, ...followUpMessages);
+  function finishOpenModelSpan(errorType: string): void {
+    const span = activeModelSpan;
+    activeModelSpan = undefined;
+    if (!span) return;
+
+    try {
+      span.setAttribute('error.type', errorType);
+      span.setStatus({ code: SPAN_STATUS_ERROR, message: errorType });
+      span.end();
+      recordTracedSpan(span, options.traceRecorder);
+    } catch {
+      // Telemetry should never break the workflow.
+    }
   }
 
   try {
@@ -746,7 +784,10 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
     }
 
     const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-      if (event.type === 'message_end' && isAssistantMessage(event.message)) {
+      if (event.type === 'turn_start') {
+        startModelSpan();
+      } else if (event.type === 'message_end' && isAssistantMessage(event.message)) {
+        finishModelSpan(event.message);
         if (
           hitMaxTurns
           && lastAssistant?.stopReason === 'toolUse'
@@ -764,7 +805,11 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
         finishToolSpan(event);
       } else if (event.type === 'turn_end') {
         if (isAssistantMessage(event.message)) {
-          recordTurnSpan(event.message, event.toolResults);
+          conversationMessages.push({
+            role: event.message.role,
+            content: event.message.content,
+            finishReason: event.message.stopReason,
+          }, ...(event.toolResults ?? []));
         }
         numTurns++;
         if (
@@ -792,11 +837,20 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
       } else {
         await promptWithTimeout(session, options.userPrompt, options.timeout);
       }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      openModelErrorType = abortSignal?.aborted
+        ? 'aborted'
+        : /timed out|timeout/i.test(message)
+          ? 'timeout'
+          : 'provider_error';
+      throw error;
     } finally {
       abortSignal?.removeEventListener('abort', onAbort);
       unsubscribe();
     }
   } finally {
+    finishOpenModelSpan(options.abortController?.signal.aborted ? 'aborted' : openModelErrorType);
     finishOpenToolSpans('aborted');
     session?.dispose();
   }
@@ -817,6 +871,7 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
     sessionId: session?.sessionId,
     durationMs: Date.now() - startedAt,
     numTurns,
+    physicalCallSpans,
     hitMaxTurns,
     warnings,
   };
@@ -939,7 +994,11 @@ async function runStructured<T>(
         if (run.lastAssistant?.provider) {
           span.setAttribute('gen_ai.provider.name', run.lastAssistant.provider);
         }
-        setGenAiUsageAttrs(span, result.usage);
+        if (run.physicalCallSpans > 0) {
+          setGenAiAggregateUsageAttrs(span, result.usage);
+        } else {
+          setGenAiUsageAttrs(span, result.usage);
+        }
         if (result.responseId) {
           span.setAttribute('gen_ai.response.id', result.responseId);
         }
@@ -1039,7 +1098,11 @@ export const piRuntime: Runtime = {
             if (run.lastAssistant?.provider) {
               span.setAttribute('gen_ai.provider.name', run.lastAssistant.provider);
             }
-            setGenAiUsageAttrs(span, result.usage);
+            if (run.physicalCallSpans > 0) {
+              setGenAiAggregateUsageAttrs(span, result.usage);
+            } else {
+              setGenAiUsageAttrs(span, result.usage);
+            }
             if (result.responseId) {
               span.setAttribute('gen_ai.response.id', result.responseId);
             }

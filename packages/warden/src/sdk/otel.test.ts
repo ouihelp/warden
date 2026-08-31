@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { genAiProviderName, genAiToolCallAttributes, genAiUsageAttributes } from './otel.js';
+import {
+  genAiProviderName,
+  genAiToolCallAttributes,
+  genAiUsageAttributes,
+  setGenAiAggregateUsageAttrs,
+} from './otel.js';
 
 describe('OpenTelemetry GenAI provider attribution', () => {
   it('uses provider ids from model selectors', () => {
@@ -24,7 +29,32 @@ describe('OpenTelemetry GenAI usage attributes', () => {
       'gen_ai.usage.output_tokens': 500,
       'gen_ai.usage.cache_read.input_tokens': 200,
       'gen_ai.usage.cache_creation.input_tokens': 100,
+      'gen_ai.usage.cost': 0.01,
     });
+  });
+
+  it('keeps agent aggregate usage explicitly non-billable', () => {
+    const attributes = new Map<string, unknown>();
+    setGenAiAggregateUsageAttrs({
+      setAttribute: (key, value) => attributes.set(key, value),
+    }, {
+      inputTokens: 1300,
+      outputTokens: 500,
+      cacheReadInputTokens: 200,
+      cacheCreationInputTokens: 100,
+      costUSD: 0.01,
+    });
+
+    expect(Object.fromEntries(attributes)).toEqual({
+      'warden.usage.scope': 'agent',
+      'warden.usage.billable': false,
+      'warden.usage.input_tokens': 1300,
+      'warden.usage.output_tokens': 500,
+      'warden.usage.cache_read.input_tokens': 200,
+      'warden.usage.cache_creation.input_tokens': 100,
+      'warden.usage.cost_usd': 0.01,
+    });
+    expect([...attributes.keys()]).not.toContain('gen_ai.usage.input_tokens');
   });
 });
 
