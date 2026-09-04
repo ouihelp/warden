@@ -159,10 +159,8 @@ export function recordTracedSpan(span: Span | undefined, traceRecorder?: TraceRe
   (traceRecorder ?? activeTraceRecorder())?.record(span);
 }
 
-/** Create a hunk-scoped recorder for Warden-owned spans under a Sentry parent span. */
-export function startTraceRecorder(parentSpan: Span | undefined): TraceRecorder | undefined {
-  if (!parentSpan) return undefined;
-
+/** Create a recorder for explicitly recorded Warden-owned spans, optionally scoped to a parent. */
+export function startTraceRecorder(parentSpan: Span | undefined): TraceRecorder {
   const parentContext = getSpanContext(parentSpan);
   const buffer = new Map<string, TraceSpan>();
 

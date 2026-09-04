@@ -63,6 +63,18 @@ export function genAiSpanName(operationName: string, targetName: string | undefi
   return trimmedTarget ? `${operationName} ${trimmedTarget}` : operationName;
 }
 
+/** Build runtime-neutral source attributes for one Warden analysis invocation. */
+export function skillAnalysisAttributes(context: {
+  filePath: string;
+  hunkLineRange: string;
+} | undefined): Record<string, string> {
+  if (!context) return {};
+  return {
+    'code.file.path': context.filePath,
+    'warden.hunk.line_range': context.hunkLineRange,
+  };
+}
+
 /** Build current OpenTelemetry GenAI usage attributes from normalized usage. */
 export function genAiUsageAttributes(usage: UsageStats): GenAiUsageAttributes {
   return {

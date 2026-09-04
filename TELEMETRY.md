@@ -43,7 +43,7 @@ has ended. Sentry remains the place to inspect model and tool spans.
 | `trace_id` from CLI summary, JSONL, or `Workflow initialized` | Sentry Traces and Logs | `span_id` | full run timeline, slow/error span | inspect skill or workflow span |
 | Sentry `event_id` | Sentry Issues/Event | `trace_id`, `operation`, `warden.trigger.name`, `gen_ai.agent.name` | exception context and owning workflow | query trace logs |
 | GitHub repository or Action run | Sentry Spans, Logs, and Metrics | `vcs.owner.name`, `vcs.repository.name`, `cicd.pipeline.run.id`, `github.event.name` | startup outcome, failure stage, and recent runs | open matching trace |
-| Skill or trigger name | Sentry Spans, Issues, Metrics | `gen_ai.agent.name`, `warden.trigger.name` | failing skill, model cost, finding count | inspect hunk or agent spans |
+| Skill or trigger name | Sentry Spans, Issues, Metrics | `gen_ai.agent.name`, `warden.trigger.name` | failing skill, model cost, finding count | inspect agent spans |
 | File path or hunk | Sentry Spans | `code.file.path`, `warden.hunk.line_range` | hunk analysis state and extraction failures | inspect agent span |
 | Model, tool, or token symptom | Sentry Spans | `gen_ai.*`, `gen_ai.tool.name` | Claude turn, tool, cost, and token behavior | inspect child spans |
 | Stale comment or fix-eval symptom | Sentry Spans and Metrics | `warden.fix_eval.finding_id`, `warden.fix_eval.verdict` | whether a finding was evaluated or resolved | inspect fix eval span |
@@ -53,7 +53,7 @@ has ended. Sentry remains the place to inspect model and tool spans.
 | Pivot | Meaning | Found In | First Query |
 | ----- | ------- | -------- | ----------- |
 | `trace_id` | one Warden run trace | CLI verbose summary, JSONL, logs, issues, spans | open trace |
-| `span_id` | one workflow, skill, hunk, model, or tool span | logs, spans | inspect span |
+| `span_id` | one workflow, skill, agent, model, or tool span | logs, spans | inspect span |
 | `event_id` | captured Sentry error | Sentry issue/event | open event |
 | `vcs.repository.name` | repository name | Action root span, logs, metrics | repo runs |
 | `vcs.owner.name` | repository owner or org | Action root span, logs, metrics | repo runs |
@@ -115,11 +115,12 @@ sort=-timestamp
 `warden.trigger.name` is present only for trigger-backed runs. Direct CLI skill
 runs have `gen_ai.agent.name` without trigger metadata.
 
-File or hunk analysis for a suspicious path.
+Per-hunk agent analysis for a suspicious path. File and line-range context is
+carried on the agent span instead of additional file and hunk wrapper spans.
 
 ```text
-dataset=spans query='span.op:skill.analyze_hunk code.file.path:"<path>"'
-fields=timestamp,trace,span_id,span.duration,gen_ai.agent.name,warden.hunk.line_range,warden.hunk.failed,warden.finding.count,error.type
+dataset=spans query='span.op:gen_ai.invoke_agent code.file.path:"<path>"'
+fields=timestamp,trace,span_id,span.duration,gen_ai.agent.name,warden.hunk.line_range,warden.retry.attempt,warden.retry.max_attempts,error.type
 sort=-timestamp
 ```
 
@@ -202,7 +203,7 @@ sort=-timestamp
 ```
 
 ```text
-dataset=spans query='trace:"<trace_id>" (span.op:skill.run OR span.op:skill.analyze_hunk OR span.op:fix_eval.evaluate) gen_ai.agent.name:"<skill_name>"'
+dataset=spans query='trace:"<trace_id>" (span.op:skill.run OR span.op:gen_ai.invoke_agent OR span.op:fix_eval.evaluate) gen_ai.agent.name:"<skill_name>"'
 fields=timestamp,span.op,span_id,span.duration,code.file.path,warden.hunk.line_range,warden.finding.count,warden.fix_eval.finding_id,warden.fix_eval.verdict,warden.fix_eval.raw_verdict,error.type
 sort=timestamp
 ```
@@ -248,11 +249,11 @@ wrong files.
 
 Events: `Skill execution started`, `Skill execution complete`
 
-Spans: `skill.run`, `skill.analyze_file`, `skill.analyze_hunk`
+Spans: `skill.run`, with one `gen_ai.invoke_agent` child per hunk attempt
 
 Attributes: `gen_ai.agent.name`, `warden.file.count`, `code.file.path`,
-`warden.hunk.count`, `warden.hunk.line_range`, `warden.hunk.failed`,
-`warden.finding.count`
+`warden.hunk.line_range`, `warden.retry.attempt`,
+`warden.retry.max_attempts`, `warden.finding.count`
 
 ### Agent And Model
 
@@ -309,8 +310,7 @@ needed.
 
 Events: JSONL records in `.warden/logs/*.jsonl`
 
-Spans: `skill.run`, `skill.analyze_file`, `skill.analyze_hunk`,
-`gen_ai.invoke_agent`
+Spans: `skill.run`, `gen_ai.invoke_agent`
 
 Attributes: `traceId` in JSONL, `runId`, `headSha`, `model`,
 `gen_ai.agent.name` in telemetry

@@ -132,7 +132,7 @@ function allHunksFailedGuidance(runtime: SkillRunnerOptions['runtime'] | undefin
 
 function buildHunkTrace(args: {
   enabled: boolean | undefined;
-  span: Span;
+  parentSpan?: Span;
   filename: string;
   lineRange: string;
   runtime: NonNullable<SkillRunnerOptions['runtime']>;
@@ -142,17 +142,24 @@ function buildHunkTrace(args: {
 }): HunkTrace | undefined {
   if (!args.enabled) return undefined;
 
-  const spanContext = getSpanContext(args.span);
   const spans = args.traceRecorder?.snapshot();
-  const childTraceId = spans?.find((span) => span.traceId)?.traceId;
+  const agentSpans = spans?.filter((span) =>
+    span.op === 'gen_ai.invoke_agent' && span.attributes?.['warden.ai.task'] === undefined
+  ) ?? [];
+  const agentSpan = (
+    args.result?.responseId
+      ? agentSpans.find((span) => span.attributes?.['gen_ai.response.id'] === args.result?.responseId)
+      : undefined
+  ) ?? [...agentSpans].reverse()[0];
+  const parentContext = getSpanContext(args.parentSpan);
 
   const trace: HunkTrace = {
     filename: args.filename,
     lineRange: args.lineRange,
     runtime: args.runtime,
     status: args.status,
-    traceId: spanContext?.traceId ?? childTraceId,
-    spanId: spanContext?.spanId,
+    traceId: agentSpan?.traceId ?? parentContext?.traceId,
+    spanId: agentSpan?.spanId,
     responseId: args.result?.responseId,
     responseModel: args.result?.responseModel,
     sessionId: args.result?.sessionId,
@@ -332,22 +339,14 @@ async function analyzeHunk(
   }
 
   const lineRange = callbacks?.lineRange ?? formatHunkLineRange(hunkCtx);
+  const activeParentSpan = parentSpan ?? Sentry.getActiveSpan();
 
-  return Sentry.startSpan(
-    {
-      op: 'skill.analyze_hunk',
-      name: `analyze hunk ${hunkCtx.filename}:${lineRange}`,
-      ...(parentSpan ? { parentSpan } : {}),
-      attributes: {
-        'gen_ai.agent.name': skill.name,
-        'code.file.path': hunkCtx.filename,
-        'warden.hunk.line_range': lineRange,
-      },
-    },
-    async (span) => {
+  return Sentry.withActiveSpan(
+    activeParentSpan ?? null,
+    async () => {
       const { abortController, retry } = options;
       const runtimeName = options.runtime ?? 'pi';
-      const traceRecorder = options.captureTraces ? startTraceRecorder(span) : undefined;
+      const traceRecorder = options.captureTraces ? startTraceRecorder(activeParentSpan) : undefined;
 
       const systemPrompt = buildHunkSystemPrompt(skill, options.historicalEvidence);
       const userPrompt = buildHunkUserPrompt(skill, hunkCtx, prContext);
@@ -385,7 +384,7 @@ async function analyzeHunk(
             attempt,
             buildHunkTrace({
               enabled: options.captureTraces,
-              span,
+              parentSpan: activeParentSpan,
               filename: hunkCtx.filename,
               lineRange,
               runtime: runtimeName,
@@ -408,7 +407,7 @@ async function analyzeHunk(
             attempts: attempt,
             trace: buildHunkTrace({
               enabled: options.captureTraces,
-              span,
+              parentSpan: activeParentSpan,
               filename: hunkCtx.filename,
               lineRange,
               runtime: runtimeName,
@@ -427,7 +426,11 @@ async function analyzeHunk(
             repoPath,
             skillName: skill.name,
             tools: skill.tools,
-            parentSpan: span,
+            parentSpan: activeParentSpan,
+            analysisContext: {
+              filePath: hunkCtx.filename,
+              hunkLineRange: lineRange,
+            },
             traceRecorder,
             options: {
               maxTurns: options.maxTurns,
@@ -460,7 +463,7 @@ async function analyzeHunk(
               attempts: attempt + 1,
               trace: buildHunkTrace({
                 enabled: options.captureTraces,
-                span,
+                parentSpan: activeParentSpan,
                 filename: hunkCtx.filename,
                 lineRange,
                 runtime: runtimeName,
@@ -515,7 +518,7 @@ async function analyzeHunk(
                 attempt + 1,
                 buildHunkTrace({
                   enabled: options.captureTraces,
-                  span,
+                  parentSpan: activeParentSpan,
                   filename: hunkCtx.filename,
                   lineRange,
                   runtime: runtimeName,
@@ -537,7 +540,7 @@ async function analyzeHunk(
               responseModel: resultMessage.responseModel,
               trace: buildHunkTrace({
                 enabled: options.captureTraces,
-                span,
+                parentSpan: activeParentSpan,
                 filename: hunkCtx.filename,
                 lineRange,
                 runtime: runtimeName,
@@ -591,9 +594,6 @@ async function analyzeHunk(
             );
           }
 
-          span.setAttribute('warden.hunk.failed', false);
-          span.setAttribute('warden.finding.count', filteredFindings.length);
-
           return {
             findings: filteredFindings,
             usage: aggregateUsage(accumulatedUsage),
@@ -612,7 +612,7 @@ async function analyzeHunk(
             responseModel: resultMessage.responseModel,
             trace: buildHunkTrace({
               enabled: options.captureTraces,
-              span,
+              parentSpan: activeParentSpan,
               filename: hunkCtx.filename,
               lineRange,
               runtime: runtimeName,
@@ -636,7 +636,7 @@ async function analyzeHunk(
               attempts: attempt + 1,
               trace: buildHunkTrace({
                 enabled: options.captureTraces,
-                span,
+                parentSpan: activeParentSpan,
                 filename: hunkCtx.filename,
                 lineRange,
                 runtime: runtimeName,
@@ -714,7 +714,7 @@ async function analyzeHunk(
               attempts: attempt + 1,
               trace: buildHunkTrace({
                 enabled: options.captureTraces,
-                span,
+                parentSpan: activeParentSpan,
                 filename: hunkCtx.filename,
                 lineRange,
                 runtime: runtimeName,
@@ -745,9 +745,6 @@ async function analyzeHunk(
         );
       }
 
-      span.setAttribute('warden.hunk.failed', true);
-      span.setAttribute('warden.finding.count', 0);
-
       const { code: retryCode, message } = classifyError(lastError);
       const retryMsg = sanitizeErrorMessage(message);
       const openReason = recordCircuitFailure(
@@ -772,7 +769,7 @@ async function analyzeHunk(
           retryConfig.maxRetries + 1,
           buildHunkTrace({
             enabled: options.captureTraces,
-            span,
+            parentSpan: activeParentSpan,
             filename: hunkCtx.filename,
             lineRange,
             runtime: runtimeName,
@@ -791,7 +788,7 @@ async function analyzeHunk(
         attempts: retryConfig.maxRetries + 1,
         trace: buildHunkTrace({
           enabled: options.captureTraces,
-          span,
+          parentSpan: activeParentSpan,
           filename: hunkCtx.filename,
           lineRange,
           runtime: runtimeName,
@@ -834,18 +831,12 @@ export async function analyzeFile(
   callbacks?: FileAnalysisCallbacks,
   prContext?: PRPromptContext,
   analysisQueue?: AsyncWorkQueue,
+  parentSpan?: Span,
 ): Promise<FileAnalysisResult> {
-  return Sentry.startSpan(
-    {
-      op: 'skill.analyze_file',
-      name: `analyze file ${file.filename}`,
-      attributes: {
-        'gen_ai.agent.name': skill.name,
-        'code.file.path': file.filename,
-        'warden.hunk.count': file.hunks.length,
-      },
-    },
-    async (span) => {
+  const activeParentSpan = parentSpan ?? Sentry.getActiveSpan();
+  return Sentry.withActiveSpan(
+    activeParentSpan ?? null,
+    async () => {
       const abortController = options.abortController ?? new AbortController();
       const hunkOptions: SkillRunnerOptions = options.abortController
         ? options
@@ -891,7 +882,7 @@ export async function analyzeFile(
             hunkOptions,
             hunkCallbacks,
             prContext,
-            span,
+            activeParentSpan,
           ).catch((error: unknown) => {
             abortController.abort();
             throw error;
@@ -970,10 +961,6 @@ export async function analyzeFile(
         }
       }
 
-      span.setAttribute('warden.finding.count', fileFindings.length);
-      span.setAttribute('warden.hunk.failed_count', failedHunks);
-      span.setAttribute('warden.extraction.failed_count', failedExtractions);
-
       return {
         filename: file.filename,
         findings: fileFindings,
@@ -1035,7 +1022,7 @@ export async function runSkill(
     },
     async (span) => {
       try {
-        const report = await runSkillAnalysis(skill, context, scopedOptions);
+        const report = await runSkillAnalysis(skill, context, scopedOptions, span);
         span.setAttribute('warden.finding.count', report.findings.length);
         emitSkillMetrics(report);
         return report;
@@ -1050,7 +1037,8 @@ export async function runSkill(
 async function runSkillAnalysis(
   skill: SkillDefinition,
   context: EventContext,
-  options: SkillRunnerOptions = {}
+  options: SkillRunnerOptions = {},
+  parentSpan?: Span,
 ): Promise<SkillReport> {
   const { parallel = true, callbacks, abortController } = options;
   const startTime = Date.now();
@@ -1168,6 +1156,7 @@ async function runSkillAnalysis(
       fileCallbacks,
       prContext,
       analysisQueue,
+      parentSpan,
     );
 
     if (fileStartTime !== undefined) {

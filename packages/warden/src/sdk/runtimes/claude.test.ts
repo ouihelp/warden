@@ -373,13 +373,17 @@ describe('claudeRuntime.runSkill', () => {
     ]));
 
     let spans: TraceSpan[] | undefined;
-    await Sentry.startSpan({ op: 'skill.analyze_hunk', name: 'analyze hunk src/example.ts:1' }, async (span) => {
+    await Sentry.startSpan({ op: 'skill.run', name: 'run test-skill' }, async (span) => {
       const traceRecorder = startTraceRecorder(span);
       await claudeRuntime.runSkill({
         systemPrompt: 'system',
         userPrompt: 'user',
         repoPath: '/repo',
         skillName: 'test-skill',
+        analysisContext: {
+          filePath: 'src/example.ts',
+          hunkLineRange: '10-12',
+        },
         parentSpan: span,
         traceRecorder,
         options: {
@@ -396,6 +400,8 @@ describe('claudeRuntime.runSkill', () => {
         op: 'gen_ai.invoke_agent',
         name: 'invoke_agent test-skill',
         attributes: expect.objectContaining({
+          'code.file.path': 'src/example.ts',
+          'warden.hunk.line_range': '10-12',
           'warden.retry.attempt': 2,
           'warden.retry.max_attempts': 3,
         }),
@@ -420,6 +426,9 @@ describe('claudeRuntime.runSkill', () => {
         }),
       }),
     ]));
+    const agentSpan = spans?.find((span) => span.op === 'gen_ai.invoke_agent');
+    expect(spans?.find((span) => span.op === 'gen_ai.chat')?.parentSpanId).toBe(agentSpan?.spanId);
+    expect(spans?.find((span) => span.op === 'gen_ai.execute_tool')?.parentSpanId).toBe(agentSpan?.spanId);
     expect(spans?.every((traceSpan) => traceSpan.traceId === spans?.[0]?.traceId)).toBe(true);
   });
 
