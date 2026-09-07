@@ -489,7 +489,6 @@ export async function runSkillTask(
             fileCallbacks,
             prContext,
             analysisQueue,
-            span,
           );
 
           // Detect if this file was aborted before any real work happened

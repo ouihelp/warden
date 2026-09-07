@@ -579,7 +579,7 @@ describe('analyzeFile', () => {
     consoleSpy.mockRestore();
   });
 
-  it('captures Warden-created Sentry spans without requiring a parent span', async () => {
+  it('captures Warden-created Sentry spans for completed hunks when enabled', async () => {
     const runSkill = vi.fn(async () => startTracedSpan(
       {
         op: 'gen_ai.invoke_agent',
@@ -676,15 +676,12 @@ describe('analyzeFile', () => {
     expect(trace?.spans?.map((span) => span.traceId)).toEqual(
       expect.arrayContaining([trace?.traceId, trace?.traceId]),
     );
-    const agentSpan = trace?.spans?.find((span) => span.op === 'gen_ai.invoke_agent');
-    expect(trace?.spanId).toBe(agentSpan?.spanId);
-    expect(trace?.spans?.find((span) => span.op === 'fs.read')?.parentSpanId).toBe(agentSpan?.spanId);
     expect(onChunkComplete).toHaveBeenCalledWith(expect.objectContaining({
       trace,
     }));
   });
 
-  it('parents semantic agent, model, and tool spans directly under the skill span', async () => {
+  it('passes the hunk span to runtimes so runtime spans are captured in traces', async () => {
     const runSkill = vi.fn(async (request: Parameters<Runtime['runSkill']>[0]) => {
       expect(request.parentSpan).toBeDefined();
       expect(request.analysisContext).toEqual({
@@ -699,50 +696,21 @@ describe('analyzeFile', () => {
           attributes: {
             'gen_ai.operation.name': 'invoke_agent',
             'gen_ai.agent.name': 'security-review',
-            'gen_ai.response.id': 'resp-parented',
           },
         },
-        (agentSpan) => {
-          startTracedSpan(
-            {
-              op: 'gen_ai.chat',
-              name: 'chat claude-test',
-              parentSpan: agentSpan,
-              attributes: {
-                'gen_ai.operation.name': 'chat',
-                'gen_ai.usage.input_tokens': 10,
-                'gen_ai.usage.output_tokens': 5,
-                'gen_ai.usage.cost': 0.001,
-              },
-            },
-            () => undefined,
-          );
-          startTracedSpan(
-            {
-              op: 'gen_ai.execute_tool',
-              name: 'execute_tool Read',
-              parentSpan: agentSpan,
-              attributes: {
-                'gen_ai.operation.name': 'execute_tool',
-                'gen_ai.tool.name': 'Read',
-              },
-            },
-            () => undefined,
-          );
-          return {
-            result: {
-              status: 'success' as const,
-              text: JSON.stringify({ findings: [] }),
-              errors: [],
-              usage: makeUsage(),
-              responseId: 'resp-parented',
-              responseModel: 'claude-test',
-              sessionId: 'session-parented',
-              durationMs: 1200,
-              numTurns: 1,
-            },
-          };
-        },
+        () => ({
+          result: {
+            status: 'success',
+            text: JSON.stringify({ findings: [] }),
+            errors: [],
+            usage: makeUsage(),
+            responseId: 'resp-parented',
+            responseModel: 'claude-test',
+            sessionId: 'session-parented',
+            durationMs: 1200,
+            numTurns: 1,
+          },
+        }),
       );
     });
     vi.mocked(getRuntime).mockReturnValue({
@@ -752,133 +720,30 @@ describe('analyzeFile', () => {
       runSynthesis: vi.fn(),
     } as unknown as Runtime);
 
-    let skillSpanId: string | undefined;
-    const result = await Sentry.startSpan(
-      { op: 'skill.run', name: 'run security-review' },
-      (span) => {
-        skillSpanId = span.spanContext().spanId;
-        return analyzeFile(
-          {
-            name: 'security-review',
-            description: 'Security review.',
-            prompt: 'Return findings as JSON.',
-          },
-          makePreparedFile(),
-          '/tmp/repo',
-          {
-            runtime: 'claude',
-            captureTraces: true,
-          },
-          undefined,
-          undefined,
-          undefined,
-          span,
-        );
+    const result = await analyzeFile(
+      {
+        name: 'security-review',
+        description: 'Security review.',
+        prompt: 'Return findings as JSON.',
+      },
+      makePreparedFile(),
+      '/tmp/repo',
+      {
+        runtime: 'claude',
+        captureTraces: true,
       },
     );
 
     const trace = result.traces?.[0];
-    const agentSpan = trace?.spans?.find((span) => span.op === 'gen_ai.invoke_agent');
-    const chatSpan = trace?.spans?.find((span) => span.op === 'gen_ai.chat');
-    const toolSpan = trace?.spans?.find((span) => span.op === 'gen_ai.execute_tool');
-    expect(trace?.spanId).toBe(agentSpan?.spanId);
-    expect(agentSpan?.parentSpanId).toBe(skillSpanId);
-    expect(chatSpan?.parentSpanId).toBe(agentSpan?.spanId);
-    expect(toolSpan?.parentSpanId).toBe(agentSpan?.spanId);
-    expect(trace?.spans?.some((span) =>
-      span.op === 'skill.analyze_file' || span.op === 'skill.analyze_hunk'
-    )).toBe(false);
-    expect(agentSpan?.attributes).not.toHaveProperty('gen_ai.usage.cost');
-    expect(chatSpan?.attributes).toMatchObject({
-      'gen_ai.usage.input_tokens': 10,
-      'gen_ai.usage.output_tokens': 5,
-      'gen_ai.usage.cost': 0.001,
-    });
-  });
-
-  it('links a hunk trace to the successful agent attempt after a retry', async () => {
-    let attempt = 0;
-    const runSkill = vi.fn(async (request: SkillRunRequest) => {
-      attempt += 1;
-      return startTracedSpan(
-        {
-          op: 'gen_ai.invoke_agent',
-          name: 'invoke_agent security-review',
-          parentSpan: request.parentSpan,
-          attributes: {
-            'gen_ai.operation.name': 'invoke_agent',
-            'gen_ai.agent.name': 'security-review',
-            'warden.retry.attempt': attempt,
-            'warden.retry.max_attempts': 2,
-            ...(attempt === 2 ? { 'gen_ai.response.id': 'resp-attempt-2' } : {}),
-          },
-        },
-        () => {
-          if (attempt === 1) {
-            throw new APIError(
-              529,
-              { error: { type: 'overloaded_error', message: 'overloaded' } },
-              'overloaded',
-              undefined,
-            );
-          }
-          return {
-            result: {
-              status: 'success' as const,
-              text: JSON.stringify({ findings: [] }),
-              errors: [],
-              usage: makeUsage(),
-              responseId: 'resp-attempt-2',
-              responseModel: 'claude-test',
-              sessionId: 'session-retried',
-              durationMs: 1200,
-              numTurns: 1,
-            },
-          };
-        },
-      );
-    });
-    vi.mocked(getRuntime).mockReturnValue({
-      name: 'claude',
-      runSkill,
-      runAuxiliary: vi.fn(),
-      runSynthesis: vi.fn(),
-    } as unknown as Runtime);
-
-    const result = await Sentry.startSpan(
-      { op: 'skill.run', name: 'run security-review' },
-      (span) => analyzeFile(
-        {
-          name: 'security-review',
-          description: 'Security review.',
-          prompt: 'Return findings as JSON.',
-        },
-        makePreparedFile(),
-        '/tmp/repo',
-        {
-          runtime: 'claude',
-          captureTraces: true,
-          retry: {
-            maxRetries: 1,
-            initialDelayMs: 1,
-            backoffMultiplier: 1,
-            maxDelayMs: 1,
-          },
-        },
-        undefined,
-        undefined,
-        undefined,
-        span,
-      ),
-    );
-
-    const trace = result.traces?.[0];
-    const agentSpans = trace?.spans?.filter((span) => span.op === 'gen_ai.invoke_agent') ?? [];
-    expect(runSkill).toHaveBeenCalledTimes(2);
-    expect(agentSpans.map((span) => span.attributes?.['warden.retry.attempt'])).toEqual([1, 2]);
-    expect(trace?.spanId).toBe(agentSpans[1]?.spanId);
-    expect(trace?.responseId).toBe('resp-attempt-2');
-    expect(trace?.spans?.some((span) => span.op === 'gen_ai.chat')).toBe(false);
+    expect(trace?.spans).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        op: 'gen_ai.invoke_agent',
+        parentSpanId: trace?.spanId,
+        attributes: expect.objectContaining({
+          'gen_ai.operation.name': 'invoke_agent',
+        }),
+      }),
+    ]));
   });
 
   it('counts provider failures once per hunk after retries are exhausted', async () => {

@@ -373,7 +373,7 @@ describe('claudeRuntime.runSkill', () => {
     ]));
 
     let spans: TraceSpan[] | undefined;
-    await Sentry.startSpan({ op: 'skill.run', name: 'run test-skill' }, async (span) => {
+    await Sentry.startSpan({ op: 'skill.analyze_hunk', name: 'analyze hunk' }, async (span) => {
       const traceRecorder = startTraceRecorder(span);
       await claudeRuntime.runSkill({
         systemPrompt: 'system',
