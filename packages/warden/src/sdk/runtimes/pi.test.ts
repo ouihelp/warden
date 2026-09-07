@@ -434,6 +434,10 @@ describe('piRuntime.runSkill', () => {
       const recorder = startTraceRecorder(span);
       await withTraceRecorder(recorder, () => piRuntime.runSkill({
         ...baseSkillRequest(),
+        analysisContext: {
+          filePath: 'src/example.ts',
+          hunkLineRange: '10-12',
+        },
         options: {
           ...baseSkillRequest().options,
           attempt: 2,
@@ -448,6 +452,8 @@ describe('piRuntime.runSkill', () => {
         op: 'gen_ai.invoke_agent',
         name: 'invoke_agent test-skill',
         attributes: expect.objectContaining({
+          'code.file.path': 'src/example.ts',
+          'warden.hunk.line_range': '10-12',
           'warden.retry.attempt': 2,
           'warden.retry.max_attempts': 3,
         }),
@@ -466,6 +472,8 @@ describe('piRuntime.runSkill', () => {
         }),
       }),
     ]));
+    const agentSpan = spans?.find((span) => span.op === 'gen_ai.invoke_agent');
+    expect(spans?.find((span) => span.op === 'gen_ai.execute_tool')?.parentSpanId).toBe(agentSpan?.spanId);
   });
 
   it('does not treat a final answer on the max turn as a turn-limit failure', async () => {

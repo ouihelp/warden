@@ -684,6 +684,10 @@ describe('analyzeFile', () => {
   it('passes the hunk span to runtimes so runtime spans are captured in traces', async () => {
     const runSkill = vi.fn(async (request: Parameters<Runtime['runSkill']>[0]) => {
       expect(request.parentSpan).toBeDefined();
+      expect(request.analysisContext).toEqual({
+        filePath: 'src/example.ts',
+        hunkLineRange: '1',
+      });
       return startTracedSpan(
         {
           op: 'gen_ai.invoke_agent',

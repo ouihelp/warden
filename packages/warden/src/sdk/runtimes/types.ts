@@ -57,6 +57,11 @@ export interface SkillRunRequest {
   allowMutatingTools?: boolean;
   /** Optional parent span used to attach runtime telemetry to a hunk trace. */
   parentSpan?: Span;
+  /** Source location being analyzed, attached to the agent span as telemetry context. */
+  analysisContext?: {
+    filePath: string;
+    hunkLineRange: string;
+  };
   /** Optional recorder used to persist runtime child spans in structured traces. */
   traceRecorder?: TraceRecorder;
   /** Provider-specific settings consumed only by the selected runtime adapter. */

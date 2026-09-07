@@ -336,7 +336,7 @@ async function analyzeHunk(
   return Sentry.startSpan(
     {
       op: 'skill.analyze_hunk',
-      name: `analyze hunk ${hunkCtx.filename}:${lineRange}`,
+      name: 'analyze hunk',
       ...(parentSpan ? { parentSpan } : {}),
       attributes: {
         'gen_ai.agent.name': skill.name,
@@ -428,6 +428,10 @@ async function analyzeHunk(
             skillName: skill.name,
             tools: skill.tools,
             parentSpan: span,
+            analysisContext: {
+              filePath: hunkCtx.filename,
+              hunkLineRange: lineRange,
+            },
             traceRecorder,
             options: {
               maxTurns: options.maxTurns,
@@ -838,7 +842,7 @@ export async function analyzeFile(
   return Sentry.startSpan(
     {
       op: 'skill.analyze_file',
-      name: `analyze file ${file.filename}`,
+      name: 'analyze file',
       attributes: {
         'gen_ai.agent.name': skill.name,
         'code.file.path': file.filename,
