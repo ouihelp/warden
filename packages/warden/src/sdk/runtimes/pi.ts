@@ -513,6 +513,8 @@ function buildSettingsManager(timeout: number | undefined, maxRetries: number | 
     retry: {
       // Provider retries are independent from Pi's agent-level transient retry loop.
       enabled: true,
+      // Keep one retry in the existing conversation; avoid multiplying long stalls.
+      maxRetries: providerMaxRetries === 0 ? 1 : providerMaxRetries,
       provider: {
         ...(timeout !== undefined ? { timeoutMs: timeout } : {}),
         maxRetries: providerMaxRetries,

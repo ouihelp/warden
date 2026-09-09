@@ -244,6 +244,7 @@ export const ErrorCodeSchema = z.enum([
   'auth_failed',
   'provider_unavailable',
   'sdk_error',
+  'request_timeout',
   'subprocess_failure',
   'max_turns',
   'aborted',

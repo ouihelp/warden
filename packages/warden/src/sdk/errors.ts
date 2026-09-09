@@ -126,6 +126,7 @@ export class WardenAuthenticationError extends Error {
  * Retries on: rate limits (429), server errors (5xx), connection errors, timeouts.
  */
 export function isRetryableError(error: unknown): boolean {
+  if (error instanceof SkillRunnerError && error.code === 'request_timeout') return true;
   if (error instanceof RateLimitError) return true;
   if (error instanceof InternalServerError) return true;
   if (error instanceof APIConnectionError) return true;

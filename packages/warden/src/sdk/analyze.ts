@@ -484,6 +484,12 @@ async function analyzeHunk(
           if (isError) {
             // Extract error messages from SDK result
             const errorMessages = resultMessage.errors;
+            const requestTimeout = errorMessages.find((message) => /LLM request (idle|absolute) timeout after \d+ms|request timed out/i.test(message));
+            if (requestTimeout) {
+              // A stuck request should fail its batch, not trip the provider-wide circuit.
+              retryConfig.maxRetries = runtimeName === 'pi' ? 0 : Math.min(retryConfig.maxRetries, 1);
+              throw new SkillRunnerError(requestTimeout, { code: 'request_timeout' });
+            }
 
             // Check if any error indicates authentication failure
             for (const err of errorMessages) {

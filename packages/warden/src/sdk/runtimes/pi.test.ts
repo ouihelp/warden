@@ -315,6 +315,7 @@ describe('piRuntime.runSkill', () => {
       compaction: { enabled: false },
       retry: expect.objectContaining({
         enabled: true,
+        maxRetries: 1,
         provider: expect.objectContaining({ maxRetries: 0 }),
       }),
     }));
