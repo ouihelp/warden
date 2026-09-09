@@ -1,3 +1,4 @@
+import { runFileReviews, type FileReview } from '../../sdk/review-files.js';
 /**
  * Task execution for skills.
  * Callback-based state updates for CLI and Ink rendering.
@@ -13,6 +14,7 @@ import { SkillRunnerError, WardenAuthenticationError, classifyError, type Provid
 import {
   prepareFiles,
   analyzeFile,
+  analyzeReviewUnit,
   aggregateUsage,
   aggregateAuxiliaryUsage,
   resolveResponseModel,
@@ -392,7 +394,7 @@ export async function runSkillTask(
           : undefined;
 
         // Files aggregate hunk results; the shared queue owns concurrency.
-        const processFile = async (prepared: PreparedFile, index: number): Promise<FileProcessResult> => {
+        const createFileReview = (prepared: PreparedFile, index: number): FileReview<FileProcessResult> => {
           const filename = prepared.filename;
           const localState = fileStates[index];
           let fileStartTime: number | undefined;
@@ -481,47 +483,43 @@ export async function runSkillTask(
               : undefined,
           };
 
-          const result = await analyzeFile(
-            skill,
-            prepared,
-            context.repoPath,
-            runnerOptions,
-            fileCallbacks,
-            prContext,
-            analysisQueue,
-          );
-
-          // Detect if this file was aborted before any real work happened
-          const fileDurationMs = fileStartTime === undefined ? 0 : Date.now() - fileStartTime;
-          const aborted = runnerOptions.abortController?.signal.aborted ?? false;
-          const noWork = !result.usage || (result.usage.inputTokens === 0 && result.usage.outputTokens === 0);
-          const fileStatus = (aborted && noWork) ? 'skipped' : 'done';
-
-          if (localState) localState.status = fileStatus;
-          callbacks.onFileUpdate(name, filename, {
-            status: fileStatus,
-            findings: result.findings,
-            usage: result.usage,
-            durationMs: fileDurationMs,
-          });
-
           return {
-            findings: result.findings,
-            usage: result.usage,
-            durationMs: fileDurationMs,
-            failedHunks: result.failedHunks,
-            failedExtractions: result.failedExtractions,
-            hunkFailures: result.hunkFailures,
-            auxiliaryUsage: result.auxiliaryUsage,
-            traces: result.traces,
-            responseModels: result.responseModels,
+            file: prepared,
+            callbacks: fileCallbacks,
+            complete(result) {
+              // Detect if this file was aborted before any real work happened
+              const fileDurationMs = fileStartTime === undefined ? 0 : Date.now() - fileStartTime;
+              const aborted = runnerOptions.abortController?.signal.aborted ?? false;
+              // A completed unit can attribute zero cost to this file. Use dispatch, not usage.
+              const noWork = fileStartTime === undefined;
+              const fileStatus = (aborted && noWork) ? 'skipped' : 'done';
+
+              if (localState) localState.status = fileStatus;
+              callbacks.onFileUpdate(name, filename, {
+                status: fileStatus,
+                findings: result.findings,
+                usage: result.usage,
+                durationMs: fileDurationMs,
+              });
+
+              return {
+                findings: result.findings,
+                usage: result.usage,
+                durationMs: fileDurationMs,
+                failedHunks: result.failedHunks,
+                failedExtractions: result.failedExtractions,
+                hunkFailures: result.hunkFailures,
+                auxiliaryUsage: result.auxiliaryUsage,
+                traces: result.traces,
+                responseModels: result.responseModels,
+              };
+            },
           };
         };
 
-        // Files only group results and progress. The shared queue schedules every hunk.
-        const allResults = await Promise.all(
-          preparedFiles.map((file, index) => processFile(file, index)),
-        );
+        // Files only group results and progress. The shared queue schedules review units.
+        const allResults = await runFileReviews(skill, preparedFiles.map(createFileReview),
+          context.repoPath, runnerOptions, analysisQueue, prContext, { analyzeFile, analyzeReviewUnit });
 
         // Mark never-dispatched files as skipped
         for (const fileState of fileStates) {

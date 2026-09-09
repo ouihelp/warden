@@ -24,7 +24,7 @@ export const FINDINGS_JSON_START = /\{\s*"findings"/;
  * Result from extracting findings JSON from text.
  */
 export type ExtractFindingsResult =
-  | { success: true; findings: unknown[]; usage?: UsageStats }
+  | { success: true; findings: unknown[]; reviewedBlocks?: string[]; usage?: UsageStats }
   | { success: false; error: string; preview: string; usage?: UsageStats };
 
 export interface AuxiliaryCallOptions {
@@ -141,7 +141,9 @@ export function extractFindingsJson(rawText: string): ExtractFindingsResult {
     };
   }
 
-  return { success: true, findings };
+  const reviewed = (parsed as Record<string, unknown>)['reviewedBlocks'];
+  return { success: true, findings, ...(Array.isArray(reviewed) && reviewed.every((id) => typeof id === 'string')
+    ? { reviewedBlocks: reviewed as string[] } : {}) };
 }
 
 /** Max characters to send to LLM fallback (roughly ~8k tokens) */
@@ -279,7 +281,7 @@ export function generateShortId(): string {
  * Validate and normalize findings from extracted JSON.
  * Replaces the LLM-provided ID with a short ID for cross-referencing.
  */
-export function validateFindings(findings: unknown[], filename: string): Finding[] {
+export function validateFindings(findings: unknown[], filename: string | ReadonlySet<string>): Finding[] {
   const validated: Finding[] = [];
 
   for (const f of findings) {
@@ -287,20 +289,28 @@ export function validateFindings(findings: unknown[], filename: string): Finding
       ? { ...(f as Record<string, unknown>) }
       : f;
 
+    const batchMode = typeof filename !== 'string';
+    const rawLocation = typeof candidate === 'object' && candidate !== null
+      ? (candidate as Record<string, unknown>)['location'] : undefined;
+    const rawPath = rawLocation && typeof rawLocation === 'object'
+      ? (rawLocation as Record<string, unknown>)['path'] : undefined;
+    if (batchMode && rawLocation && (typeof rawPath !== 'string' || !filename.has(rawPath))) continue;
+    const path = batchMode ? rawPath as string : filename;
+
     // Normalize location path before validation
     if (typeof candidate === 'object' && candidate !== null && 'location' in candidate) {
       const loc = (candidate as Record<string, unknown>)['location'];
       if (loc && typeof loc === 'object') {
         (candidate as Record<string, unknown>)['location'] = {
           ...(loc as Record<string, unknown>),
-          path: filename,
+          path,
         };
       }
     }
 
     const result = ExtractedFindingSchema.safeParse(candidate);
     if (result.success) {
-      const location = result.data.location ? { ...result.data.location, path: filename } : undefined;
+      const location = result.data.location ? { ...result.data.location, path } : undefined;
       validated.push({
         ...result.data,
         id: generateShortId(),

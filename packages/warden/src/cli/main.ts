@@ -290,6 +290,8 @@ function appendChunkToRunLog(log: RunLog, skillName: string, chunk: ChunkAnalysi
       index: chunk.index,
       total: chunk.total,
       lineRange: chunk.lineRange,
+      batchId: chunk.batchId,
+      blockId: chunk.blockId,
     },
     status: error ? 'error' : 'ok',
     findings: chunk.findings,

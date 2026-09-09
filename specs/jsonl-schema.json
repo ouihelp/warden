@@ -52,6 +52,12 @@
             },
             "lineRange": {
               "type": "string"
+            },
+            "batchId": {
+              "type": "string"
+            },
+            "blockId": {
+              "type": "string"
             }
           },
           "required": [

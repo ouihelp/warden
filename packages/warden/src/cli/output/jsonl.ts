@@ -113,6 +113,8 @@ export const JsonlChunkRecordSchema = z.object({
     index: z.number().int().positive(),
     total: z.number().int().positive(),
     lineRange: z.string(),
+    batchId: z.string().optional(),
+    blockId: z.string().optional(),
   }),
   status: z.enum(['ok', 'error', 'skipped']),
   findings: z.array(FindingSchema),
