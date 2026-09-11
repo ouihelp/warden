@@ -1201,7 +1201,7 @@ async function runSkillAnalysis(
   const concurrency = parallel ? options.concurrency ?? DEFAULT_ANALYSIS_CONCURRENCY : 1;
   const analysisQueue = new AsyncWorkQueue(concurrency);
   const fileResults = await runFileReviews(skill, fileHunks.map(createFileReview),
-    context.repoPath, options, analysisQueue, prContext, { analyzeFile, analyzeReviewUnit });
+    context.repoPath, options, analysisQueue, prContext, { analyzeFile, analyzeReviewUnit }, context.diffContextSource);
 
   // Accumulate results from ordered fileResults
   const allHunkFailures: HunkFailure[] = [];

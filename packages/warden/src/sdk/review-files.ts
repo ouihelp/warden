@@ -2,7 +2,8 @@ import type { analyzeFile, analyzeReviewUnit } from './analyze.js';
 import { GroupingConfigSchema, type SkillDefinition } from '../config/schema.js';
 import { buildBatchUserPrompt, buildHunkSystemPrompt, type PRPromptContext } from './prompt.js';
 import { getHunkLineRange, type HunkWithContext } from '../diff/index.js';
-import type { HunkFailure } from '../types/index.js';
+import { buildBlockRelations, loadDependencySources } from './dependencies.js';
+import type { DiffContextSource, HunkFailure } from '../types/index.js';
 import type { AsyncWorkQueue } from '../utils/async.js';
 import { planBatches } from './batches.js';
 import { mapExtractionErrorCode } from './errors.js';
@@ -132,6 +133,7 @@ export async function runFileReviews<Result>(
     analyzeFile: typeof analyzeFile;
     analyzeReviewUnit: typeof analyzeReviewUnit;
   },
+  contentSource?: DiffContextSource,
 ): Promise<Result[]> {
   const config = GroupingConfigSchema.parse({
     ...options.chunking?.grouping,
@@ -151,8 +153,9 @@ export async function runFileReviews<Result>(
     return results;
   }
   const systemChars = buildHunkSystemPrompt(skill, options.historicalEvidence, true).length;
+  const relations = buildBlockRelations(files, loadDependencySources(files, repoPath, contentSource));
   const units = planBatches(files, config,
-    (unit) => systemChars + buildBatchUserPrompt(skill, unit, prContext).length);
+    (unit) => systemChars + buildBatchUserPrompt(skill, unit, prContext).length, relations);
   const scoped = { ...options, abortController: options.abortController ?? new AbortController() };
   return executeReviewPlan(units, reviews, queue, scoped,
     (unit, callbacks) => executors.analyzeReviewUnit(skill, unit, repoPath, scoped, callbacks, prContext)

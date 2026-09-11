@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { HunkWithContext } from '../diff/index.js';
 import { AsyncWorkQueue } from '../utils/async.js';
 import type { analyzeFile, analyzeReviewUnit } from './analyze.js';
@@ -23,6 +26,26 @@ const success = (unit: ReviewUnit): HunkAnalysisResult => ({ findings: [], usage
 afterEach(() => vi.unstubAllEnvs());
 
 describe('unit execution and file reporting', () => {
+  it('uses syntax dependencies in the shared SDK and CLI orchestration', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'warden-unit-ast-'));
+    try {
+      mkdirSync(join(dir, 'a'));
+      mkdirSync(join(dir, 'z'));
+      writeFileSync(join(dir, 'a/use.py'), 'from z.model import Kind\n' + '\n'.repeat(8) + 'value = Kind.ACTIVE\n');
+      writeFileSync(join(dir, 'z/model.py'), '\n'.repeat(9) + 'class Kind(Enum):\n    ACTIVE = "active"\n');
+      writeFileSync(join(dir, 'a/zz.py'), 'value = 1\n');
+      const consumer = hunk('a/use.py');
+      const definition = hunk('z/model.py');
+      const unrelated = hunk('a/zz.py');
+      const analyze = vi.fn<typeof analyzeReviewUnit>(async (_skill, unit) => success(unit));
+      const results = await runFileReviews({ name: 'test', prompt: 'Review', description: 'Test' },
+        [consumer, definition, unrelated].map(fileReview), dir,
+        { chunking: { grouping: { enabled: true, minChunks: 2, maxFiles: 2, maxPromptChars: 48000 } } },
+        new AsyncWorkQueue(1), undefined, { analyzeFile: vi.fn(), analyzeReviewUnit: analyze });
+      expect(analyze.mock.calls[0]?.[1].members).toEqual([consumer, definition]);
+      expect(results.map((result) => result.failedHunks)).toEqual([0, 0, 0]);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
   it('executes a multi-file unit once and preserves lane identity, response model and cost', async () => {
     const a = hunk('src/a.py');
     const b = hunk('src/b.py');

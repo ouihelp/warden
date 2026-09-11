@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { GroupingConfigSchema } from '../config/schema.js';
 import type { HunkWithContext } from '../diff/index.js';
 import { planBatches } from './batches.js';
+import { buildBlockRelations } from './dependencies.js';
 import { findingBlock } from './review-unit.js';
 import { buildBatchUserPrompt, buildHunkSystemPrompt } from './prompt.js';
 import { validateFindings } from './extract.js';
@@ -28,17 +29,25 @@ describe('deterministic review batches', () => {
     const definition = hunk('api/enums.py', 'class Kind(OhStrEnum):');
     const consumer = hunk('billing/service.py');
     const unrelated = hunk('api/other.py', 'value = 1');
-    const batches = planBatches(files([unrelated, consumer, definition]), { ...config, maxFiles: 2 }, chars);
+    const relations = buildBlockRelations(files([definition, consumer, unrelated]), new Map([
+      [definition.filename, '\n'.repeat(9) + 'class Kind(OhStrEnum):\n    ACTIVE = "active"\n'],
+      [consumer.filename, 'from api.enums import Kind\n' + '\n'.repeat(8) + 'value = Kind.ACTIVE\n'],
+    ]));
+    const batches = planBatches(files([unrelated, consumer, definition]), { ...config, maxFiles: 2 }, chars, relations);
     expect(batches[0]!.members).toEqual([definition, consumer]);
     expect(batches.flatMap((b) => b.members)).toHaveLength(3);
-    expect(planBatches(files([definition, consumer, unrelated]), { ...config, maxFiles: 2 }, chars)).toEqual(batches);
+    expect(planBatches(files([definition, consumer, unrelated]), { ...config, maxFiles: 2 }, chars, relations)).toEqual(batches);
   });
 
   it('uses explicit imports when there is no enum reference', () => {
     const a = hunk('a/source.py', 'from z.model import Record');
     const b = hunk('a/unrelated.py', 'value = 1');
     const model = hunk('z/model.py', 'class Record:');
-    expect(planBatches(files([a, b, model]), { ...config, maxFiles: 2 }, chars)[0]!.members).toEqual([a, model]);
+    const relations = buildBlockRelations(files([a, b, model]), new Map([
+      [a.filename, '\n'.repeat(9) + 'from z.model import Record\n'],
+      [model.filename, '\n'.repeat(9) + 'class Record:\n    pass\n'],
+    ]));
+    expect(planBatches(files([a, b, model]), { ...config, maxFiles: 2 }, chars, relations)[0]!.members).toEqual([a, model]);
   });
 
   it('bounds the full prompt including surrounding context and never loses oversized blocks', () => {
@@ -56,7 +65,11 @@ describe('deterministic review batches', () => {
   it('adds already assigned enum definitions as bounded reference context', () => {
     const definition = hunk('a/enums.py', 'class Kind(OhStrEnum):');
     const consumers = [hunk('b/a.py'), hunk('c/b.py')];
-    const batches = planBatches(files([definition, ...consumers]), { ...config, maxFiles: 2 }, chars);
+    const relations = buildBlockRelations(files([definition, ...consumers]), new Map([
+      [definition.filename, '\n'.repeat(9) + 'class Kind(OhStrEnum):\n    ACTIVE = "active"\n'],
+      ...consumers.map((consumer): [string, string] => [consumer.filename, 'from a.enums import Kind\n' + '\n'.repeat(8) + 'value = Kind.ACTIVE\n']),
+    ]));
+    const batches = planBatches(files([definition, ...consumers]), { ...config, maxFiles: 2 }, chars, relations);
     expect(batches[1]!.references).toContain(definition);
     expect(findingBlock(finding(definition.filename), batches[1]!)).toBeUndefined();
   });

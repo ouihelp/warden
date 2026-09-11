@@ -519,7 +519,7 @@ export async function runSkillTask(
 
         // Files only group results and progress. The shared queue schedules review units.
         const allResults = await runFileReviews(skill, preparedFiles.map(createFileReview),
-          context.repoPath, runnerOptions, analysisQueue, prContext, { analyzeFile, analyzeReviewUnit });
+          context.repoPath, runnerOptions, analysisQueue, prContext, { analyzeFile, analyzeReviewUnit }, context.diffContextSource);
 
         // Mark never-dispatched files as skipped
         for (const fileState of fileStates) {
