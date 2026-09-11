@@ -28,6 +28,7 @@ export const LARGE_PROMPT_THRESHOLD_CHARS = 100000;
 
 /** Result from analyzing a single hunk */
 export interface HunkAnalysisResult {
+  reviewedBlocks?: string[];
   findings: Finding[];
   usage: UsageStats;
   /** Whether the hunk analysis failed (SDK error, API error, etc.) */
@@ -54,6 +55,8 @@ export interface HunkAnalysisResult {
 
 /** Result from one completed chunk, suitable for durable run logging. */
 export interface ChunkAnalysisResult {
+  batchId?: string;
+  blockId?: string;
   filename: string;
   model?: string;
   index: number;
@@ -77,6 +80,8 @@ export interface ChunkAnalysisResult {
  * Callbacks for progress reporting during skill execution.
  */
 export interface SkillRunnerCallbacks {
+  /** Durable completion for each original block, including batch coverage failures. */
+  onChunkComplete?: (chunk: ChunkAnalysisResult) => void;
   /** Start time of the skill execution (for elapsed time calculations) */
   skillStartTime?: number;
   onFileStart?: (file: string, index: number, total: number) => void;
@@ -156,7 +161,7 @@ export interface SkillRunnerOptions {
   historicalEvidence?: string;
 }
 
-export type AnalysisChunkingConfig = Pick<ChunkingConfig, 'filePatterns' | 'coalesce'>;
+export type AnalysisChunkingConfig = Pick<ChunkingConfig, 'filePatterns' | 'coalesce' | 'grouping'>;
 
 /**
  * A file prepared for analysis with its hunks.

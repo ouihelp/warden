@@ -187,12 +187,23 @@ export const CoalesceConfigSchema = z.object({
 });
 export type CoalesceConfig = z.infer<typeof CoalesceConfigSchema>;
 
+/** Deterministic grouping only changes large reviews. */
+export const GroupingConfigSchema = z.object({
+  enabled: z.boolean().default(false),
+  minChunks: z.number().int().positive().default(24),
+  maxFiles: z.number().int().positive().default(8),
+  /** Full initial system + user prompt, including surrounding and shared context. */
+  maxPromptChars: z.number().int().positive().default(48000),
+});
+export type GroupingConfig = z.infer<typeof GroupingConfigSchema>;
+
 // Chunking configuration for controlling how files are processed
 export const ChunkingConfigSchema = z.object({
   /** Patterns to control file processing mode */
   filePatterns: z.array(FilePatternSchema).optional(),
   /** Coalescing options for merging nearby hunks */
   coalesce: CoalesceConfigSchema.optional(),
+  grouping: GroupingConfigSchema.optional(),
   /** Max number of "other files" to list in hunk prompts for PR context. 0 disables the section entirely. Default: 50 */
   maxContextFiles: z.number().int().nonnegative().default(50),
 });

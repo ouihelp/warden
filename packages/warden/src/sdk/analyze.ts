@@ -2,14 +2,14 @@ import type { Span } from '@sentry/node';
 import type { SkillDefinition } from '../config/schema.js';
 import { isExtractionErrorCode } from '../types/index.js';
 import type { ErrorCode, Finding, RetryConfig } from '../types/index.js';
-import { getHunkLineRange, type HunkWithContext } from '../diff/index.js';
+import { getHunkLineRange, parsePatch, type HunkWithContext } from '../diff/index.js';
 import { Sentry, emitExtractionMetrics, emitRetryMetric, emitSkillMetrics, ensureLocalTracing } from '../sentry.js';
 import { SkillRunnerError, WardenAuthenticationError, isRetryableError, isAuthenticationError, isAuthenticationErrorMessage, isSubprocessError, classifyError, mapExtractionErrorCode, sanitizeErrorMessage, type ProviderErrorContext } from './errors.js';
 import { genAiProviderName } from './otel.js';
 import type { CircuitBreakerReason } from './circuit-breaker.js';
 import { DEFAULT_RETRY_CONFIG, calculateRetryDelay, sleep } from './retry.js';
 import { aggregateUsage, emptyUsage, estimateTokens, aggregateAuxiliaryUsage, aggregateAuxiliaryUsageAttribution, resolveResponseModel } from './usage.js';
-import { buildHunkSystemPrompt, buildHunkUserPrompt, type PRPromptContext } from './prompt.js';
+import { buildHunkSystemPrompt, buildHunkUserPrompt, buildBatchUserPrompt, type PRPromptContext } from './prompt.js';
 import { extractFindingsJson, extractFindingsWithLLM, validateFindings } from './extract.js';
 import type { ExtractFindingsResult } from './extract.js';
 import { postProcessFindings } from './post-process.js';
@@ -28,6 +28,8 @@ import {
   type FileAnalysisResult,
   type ChunkAnalysisResult,
 } from './types.js';
+import { findingBlock, singleBlockUnit, type ReviewUnit } from './review-unit.js';
+import { runFileReviews, type FileReview } from './review-files.js';
 import { prepareFiles } from './prepare.js';
 import type { EventContext, SkillReport, UsageStats, HunkFailure, HunkTrace, VerifierRejections } from '../types/index.js';
 import type { SourceSnippet, SourceSnippetLine } from '../types/index.js';
@@ -172,7 +174,7 @@ function buildHunkTrace(args: {
  */
 async function parseHunkOutput(
   result: SkillRunResult,
-  filename: string,
+  filename: string | ReadonlySet<string>,
   skillName: string,
   options: SkillRunnerOptions
 ): Promise<ParseHunkOutputResult> {
@@ -256,13 +258,13 @@ function hunkSourceLines(hunkCtx: HunkWithContext): SourceSnippetLine[] {
     lines.push({ line: hunkCtx.contextStartLine + index, content });
   }
 
-  let newLine = hunkCtx.hunk.newStart;
-  for (const diffLine of hunkCtx.hunk.lines) {
-    if (diffLine.startsWith('-')) continue;
-    if (!diffLine.startsWith('+') && !diffLine.startsWith(' ')) continue;
-    const content = diffLine.slice(1);
-    lines.push({ line: newLine, content });
-    newLine += 1;
+  // Coalesced blocks retain separate headers; reset numbering after each gap.
+  for (const original of parsePatch(hunkCtx.hunk.content)) {
+    let newLine = original.newStart;
+    for (const diffLine of original.lines) {
+      if (!diffLine.startsWith('+') && !diffLine.startsWith(' ')) continue;
+      lines.push({ line: newLine++, content: diffLine.slice(1) });
+    }
   }
 
   const afterStart = hunkCtx.hunk.newStart + hunkCtx.hunk.newCount;
@@ -316,22 +318,25 @@ function attachSourceSnippets(findings: Finding[], hunkCtx: HunkWithContext): Fi
 }
 
 /**
- * Analyze a single hunk with retry logic for transient failures.
+ * Execute one review unit with retry logic for transient failures.
  */
-async function analyzeHunk(
+export async function analyzeReviewUnit(
   skill: SkillDefinition,
-  hunkCtx: HunkWithContext,
+  unit: ReviewUnit,
   repoPath: string,
   options: SkillRunnerOptions,
   callbacks?: HunkAnalysisCallbacks,
   prContext?: PRPromptContext,
   parentSpan?: Span,
 ): Promise<HunkAnalysisResult> {
+  const hunkCtx = unit.members[0];
+  if (!hunkCtx) throw new Error('A review unit must contain a target block');
+  const batch = unit.kind === 'group' ? unit : undefined;
   if (options.captureTraces) {
     ensureLocalTracing();
   }
 
-  const lineRange = callbacks?.lineRange ?? formatHunkLineRange(hunkCtx);
+  const lineRange = batch ? formatHunkLineRange(hunkCtx) : callbacks?.lineRange ?? formatHunkLineRange(hunkCtx);
 
   return Sentry.startSpan(
     {
@@ -342,6 +347,7 @@ async function analyzeHunk(
         'gen_ai.agent.name': skill.name,
         'code.file.path': hunkCtx.filename,
         'warden.hunk.line_range': lineRange,
+        ...(batch ? { 'warden.batch.id': batch.id, 'warden.batch.blocks': batch.members.length } : {}),
       },
     },
     async (span) => {
@@ -349,8 +355,8 @@ async function analyzeHunk(
       const runtimeName = options.runtime ?? 'pi';
       const traceRecorder = options.captureTraces ? startTraceRecorder(span) : undefined;
 
-      const systemPrompt = buildHunkSystemPrompt(skill, options.historicalEvidence);
-      const userPrompt = buildHunkUserPrompt(skill, hunkCtx, prContext);
+      const systemPrompt = buildHunkSystemPrompt(skill, options.historicalEvidence, Boolean(batch));
+      const userPrompt = batch ? buildBatchUserPrompt(skill, batch, prContext) : buildHunkUserPrompt(skill, hunkCtx, prContext);
 
       // Report prompt size information
       const systemChars = systemPrompt.length;
@@ -484,6 +490,12 @@ async function analyzeHunk(
           if (isError) {
             // Extract error messages from SDK result
             const errorMessages = resultMessage.errors;
+            const requestTimeout = errorMessages.find((message) => /LLM request (idle|absolute) timeout after \d+ms|request timed out/i.test(message));
+            if (requestTimeout) {
+              // A stuck request should fail its batch, not trip the provider-wide circuit.
+              retryConfig.maxRetries = runtimeName === 'pi' ? 0 : Math.min(retryConfig.maxRetries, 1);
+              throw new SkillRunnerError(requestTimeout, { code: 'request_timeout' });
+            }
 
             // Check if any error indicates authentication failure
             for (const err of errorMessages) {
@@ -555,13 +567,22 @@ async function analyzeHunk(
           options.circuitBreaker?.recordSuccess();
           const parseResult = await withTraceRecorder(
             traceRecorder,
-            () => parseHunkOutput(resultMessage, hunkCtx.filename, skill.name, options),
+            () => parseHunkOutput(resultMessage, batch ? new Set(batch.members.map((member) => member.filename)) : hunkCtx.filename, skill.name, options),
           );
 
           // Filter findings outside hunk line range (defense-in-depth)
           const hunkRange = getHunkLineRange(hunkCtx.hunk);
-          const { filtered, dropped } = filterOutOfRangeFindings(parseResult.findings, hunkRange);
-          const filteredFindings = attachSourceSnippets(filtered, hunkCtx);
+          const { filtered, dropped } = batch
+            ? { filtered: parseResult.findings.filter((finding) => findingBlock(finding, batch)),
+                dropped: parseResult.findings.filter((finding) => !findingBlock(finding, batch)) }
+            : filterOutOfRangeFindings(parseResult.findings, hunkRange);
+          const filteredFindings = batch
+            ? filtered.flatMap((finding) => {
+                const member = findingBlock(finding, batch);
+                return member ? attachSourceSnippets([finding], member) : [];
+              })
+            : attachSourceSnippets(filtered, hunkCtx);
+          const originalOutput = batch ? extractFindingsJson(resultMessage.text) : undefined;
           if (dropped.length > 0) {
             Sentry.addBreadcrumb({
               category: 'finding.out_of_range',
@@ -600,6 +621,8 @@ async function analyzeHunk(
 
           return {
             findings: filteredFindings,
+            // A fallback extractor cannot certify coverage on the reviewer's behalf.
+            ...(batch ? { reviewedBlocks: originalOutput?.success ? originalOutput.reviewedBlocks ?? [] : [] } : {}),
             usage: aggregateUsage(accumulatedUsage),
             failed: false,
             extractionFailed: parseResult.extractionFailed,
@@ -888,9 +911,9 @@ export async function analyzeFile(
             : undefined;
 
           const hunkStartTime = Date.now();
-          const result = await analyzeHunk(
+          const result = await analyzeReviewUnit(
             skill,
-            hunk,
+            singleBlockUnit(hunk),
             repoPath,
             hunkOptions,
             hunkCallbacks,
@@ -1056,7 +1079,7 @@ async function runSkillAnalysis(
   context: EventContext,
   options: SkillRunnerOptions = {}
 ): Promise<SkillReport> {
-  const { parallel = true, callbacks, abortController } = options;
+  const { parallel = true, callbacks } = options;
   const startTime = Date.now();
 
   if (!context.pullRequest) {
@@ -1113,14 +1136,15 @@ async function runSkillAnalysis(
   };
 
   /** Wrap analyzeFile with progress callbacks. */
-  async function processFile(
+  function createFileReview(
     fileHunkEntry: PreparedFile,
     fileIndex: number
-  ): Promise<{ filename: string; result: FileAnalysisResult; durationMs: number }> {
+  ): FileReview<{ filename: string; result: FileAnalysisResult; durationMs: number }> {
     const { filename } = fileHunkEntry;
     let fileStartTime: number | undefined;
 
     const fileCallbacks: FileAnalysisCallbacks = {
+      onChunkComplete: callbacks?.onChunkComplete,
       skillStartTime: callbacks?.skillStartTime,
       onHunkStart: (hunkNum, totalHunks, lineRange) => {
         if (fileStartTime === undefined) {
@@ -1164,49 +1188,20 @@ async function runSkillAnalysis(
         : undefined,
     };
 
-    const result = await analyzeFile(
-      skill,
-      fileHunkEntry,
-      context.repoPath,
-      options,
-      fileCallbacks,
-      prContext,
-      analysisQueue,
-    );
-
-    if (fileStartTime !== undefined) {
-      callbacks?.onFileComplete?.(filename, fileIndex, totalFiles);
-    }
-
     return {
-      filename,
-      result,
-      durationMs: fileStartTime === undefined ? 0 : Date.now() - fileStartTime,
+      file: fileHunkEntry,
+      callbacks: fileCallbacks,
+      complete(result) {
+        if (fileStartTime !== undefined) callbacks?.onFileComplete?.(filename, fileIndex, totalFiles);
+        return { filename, result, durationMs: fileStartTime === undefined ? 0 : Date.now() - fileStartTime };
+      },
     };
   }
 
-  const concurrency = parallel
-    ? options.concurrency ?? DEFAULT_ANALYSIS_CONCURRENCY
-    : 1;
+  const concurrency = parallel ? options.concurrency ?? DEFAULT_ANALYSIS_CONCURRENCY : 1;
   const analysisQueue = new AsyncWorkQueue(concurrency);
-
-  // Collect results in input order (Promise.all preserves order)
-  const fileResults: { filename: string; result: FileAnalysisResult; durationMs: number }[] = [];
-
-  // Process files - parallel or sequential based on options
-  if (parallel) {
-    fileResults.push(...await Promise.all(
-      fileHunks.map((fileHunkEntry, index) => processFile(fileHunkEntry, index)),
-    ));
-  } else {
-    // Process files sequentially
-    for (const [fileIndex, fileHunkEntry] of fileHunks.entries()) {
-      // Check for abort before starting new file
-      if (abortController?.signal.aborted) break;
-
-      fileResults.push(await processFile(fileHunkEntry, fileIndex));
-    }
-  }
+  const fileResults = await runFileReviews(skill, fileHunks.map(createFileReview),
+    context.repoPath, options, analysisQueue, prContext, { analyzeFile, analyzeReviewUnit }, context.diffContextSource);
 
   // Accumulate results from ordered fileResults
   const allHunkFailures: HunkFailure[] = [];

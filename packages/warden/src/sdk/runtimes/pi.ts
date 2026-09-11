@@ -1,3 +1,4 @@
+import { reviewCacheKey, sharePromptCache } from './prompt-cache.js';
 /**
  * Pi runtime adapter.
  *
@@ -512,6 +513,8 @@ function buildSettingsManager(timeout: number | undefined, maxRetries: number | 
     retry: {
       // Provider retries are independent from Pi's agent-level transient retry loop.
       enabled: true,
+      // Keep one retry in the existing conversation; avoid multiplying long stalls.
+      maxRetries: providerMaxRetries === 0 ? 1 : providerMaxRetries,
       provider: {
         ...(timeout !== undefined ? { timeoutMs: timeout } : {}),
         maxRetries: providerMaxRetries,
@@ -780,6 +783,14 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
       settingsManager,
     });
     session = result.session;
+    // Cache routing is shared; transcripts, session IDs, and tool state stay independent.
+    const cacheKey = reviewCacheKey({ cwd: options.cwd, model: options.model ?? 'default',
+      systemPrompt: options.systemPrompt, toolNames: options.toolNames });
+    const previousPayloadHook = session.agent.onPayload;
+    session.agent.onPayload = async (payload, providerModel) => {
+      const transformed = await previousPayloadHook?.(payload, providerModel);
+      return sharePromptCache(transformed ?? payload, cacheKey);
+    };
     if (result.modelFallbackMessage) {
       warnings.push(result.modelFallbackMessage);
     }

@@ -1,3 +1,4 @@
+import { runSkillTask } from '../cli/output/tasks.js';
 import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
 import { APIError } from '@anthropic-ai/sdk';
 import type { SkillDefinition } from '../config/schema.js';
@@ -1535,4 +1536,77 @@ describe('runSkill', () => {
     expect(runSkillMock).toHaveBeenCalledTimes(2);
     consoleSpy.mockRestore();
   });
+});
+
+describe('grouped skill execution', () => {
+  const skill = { name: 'review', description: 'Review', prompt: 'Find regressions.' };
+  const grouping = { enabled: true, minChunks: 2, maxFiles: 8, maxPromptChars: 48000 };
+  const context = () => {
+    const ctx = makeContextWithOneHunk();
+    const first = ctx.pullRequest!.files[0]!;
+    ctx.pullRequest!.files = [
+      { ...first, filename: 'src/a.ts' },
+      { ...first, filename: 'src/b.ts' },
+    ];
+    return ctx;
+  };
+  function mockReview(acknowledge: 'all' | 'first' | 'none', withFinding = false) {
+    const review = vi.fn(async (request: SkillRunRequest) => {
+      const ids = [...request.userPrompt.matchAll(/<target_block id="([^"]+)">/g)].map((match) => match[1]);
+      return { result: { status: 'success', text: JSON.stringify({
+        findings: withFinding ? [{ ...makeFinding(10), location: { path: 'src/b.ts', startLine: 10 } }] : [],
+        ...(acknowledge !== 'none' ? { reviewedBlocks: acknowledge === 'all' ? ids : ids.slice(0, 1) } : {}),
+      }), errors: [], usage: makeUsage() } };
+    });
+    vi.mocked(getRuntime).mockReturnValue({ name: 'pi', runSkill: review, runAuxiliary: vi.fn(), runSynthesis: vi.fn() } as unknown as Runtime);
+    return review;
+  }
+
+  it('reviews two files in one conversation and preserves their findings and total usage', async () => {
+    const review = mockReview('all', true);
+    const onChunkComplete = vi.fn();
+    const report = await runSkill(skill, context(), { chunking: { grouping }, concurrency: 1,
+      postProcessFindings: false, callbacks: { onChunkComplete } });
+    expect(review).toHaveBeenCalledTimes(1);
+    expect(report.findings.map((f) => f.location?.path)).toEqual(['src/b.ts']);
+    expect(report.usage?.costUSD).toBe(makeUsage().costUSD);
+    expect(onChunkComplete).toHaveBeenCalledTimes(2);
+    expect(onChunkComplete.mock.calls.map(([chunk]) => chunk.blockId)).toHaveLength(2);
+    expect(new Set(onChunkComplete.mock.calls.map(([chunk]) => chunk.batchId)).size).toBe(1);
+  });
+
+  it('keeps a missing acknowledgement as a failed block alongside completed blocks', async () => {
+    mockReview('first');
+    const report = await runSkill(skill, context(), { chunking: { grouping }, postProcessFindings: false });
+    expect(report.failedHunks).toBe(1);
+    expect(report.hunkFailures?.[0]?.filename).toBe('src/b.ts');
+  });
+
+  it('cannot produce a clean report when the output omits the coverage declaration', async () => {
+    mockReview('none');
+    await expect(runSkill(skill, context(), { chunking: { grouping }, postProcessFindings: false }))
+      .rejects.toMatchObject({ code: 'all_hunks_failed' });
+  });
+
+  it('leaves small PRs on independent sessions', async () => {
+    const review = mockReview('none');
+    const report = await runSkill(skill, context(), { chunking: { grouping: { ...grouping, minChunks: 24 } }, postProcessFindings: false });
+    expect(review).toHaveBeenCalledTimes(2);
+    expect(report.failedHunks ?? 0).toBe(0);
+  });
+  it('uses the same grouping and coverage contract in the GitHub action task path', async () => {
+    const review = mockReview('first');
+    const onChunkComplete = vi.fn();
+    const result = await runSkillTask({ name: 'review', context: context(), resolveSkill: async () => skill,
+      runnerOptions: { chunking: { grouping }, postProcessFindings: false } }, {
+      onSkillStart: vi.fn(), onSkillUpdate: vi.fn(), onFileUpdate: vi.fn(), onSkillComplete: vi.fn(),
+      onSkillSkipped: vi.fn(), onSkillError: vi.fn(), onChunkComplete,
+    });
+    expect(review).toHaveBeenCalledTimes(1);
+    expect(result.report?.failedHunks).toBe(1);
+    expect(onChunkComplete).toHaveBeenCalledTimes(2);
+    expect(onChunkComplete.mock.calls[1]?.[1]).toMatchObject({ filename: 'src/b.ts', failed: true, batchId: expect.any(String) });
+  });
+
+
 });

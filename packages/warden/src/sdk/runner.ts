@@ -67,7 +67,7 @@ export type {
 } from './post-process.js';
 
 // Re-export analysis functions
-export { analyzeFile, runSkill, generateSummary } from './analyze.js';
+export { analyzeFile, analyzeReviewUnit, runSkill, generateSummary } from './analyze.js';
 export { runLocalSkill, verifyLocalFindings } from './local.js';
 export type {
   LocalSkillServiceOptions,

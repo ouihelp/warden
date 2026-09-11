@@ -40,6 +40,7 @@ const piMocks = vi.hoisted(() => {
   };
   const session = {
     sessionId: 'pi-session-1',
+    agent: { onPayload: undefined as undefined | ((payload: unknown, model: unknown) => Promise<unknown>) },
     subscribe: vi.fn((listener: (event: unknown) => void) => {
       piMocks.listeners.push(listener);
       return vi.fn();
@@ -173,6 +174,7 @@ function baseSkillRequest() {
 
 describe('piRuntime.runSkill', () => {
   beforeEach(() => {
+    piMocks.session.agent.onPayload = undefined;
     vi.clearAllMocks();
     resetWardenOfflineForTests();
     delete process.env['WARDEN_OFFLINE'];
@@ -190,6 +192,9 @@ describe('piRuntime.runSkill', () => {
     expect(createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({ model: piMocks.model })
     );
+    const transformed = await piMocks.session.agent.onPayload?.({ prompt_cache_key: 'unique-session', input: [] }, piMocks.model);
+    expect(transformed).toMatchObject({ prompt_cache_key: expect.stringMatching(/^warden-/), input: [] });
+    expect(piMocks.session.sessionId).toBe('pi-session-1');
   });
 
   it('applies WARDEN_<PROVIDER>_BASE_URL to the resolved model', async () => {
@@ -310,6 +315,7 @@ describe('piRuntime.runSkill', () => {
       compaction: { enabled: false },
       retry: expect.objectContaining({
         enabled: true,
+        maxRetries: 1,
         provider: expect.objectContaining({ maxRetries: 0 }),
       }),
     }));

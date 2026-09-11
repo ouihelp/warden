@@ -52,6 +52,12 @@
             },
             "lineRange": {
               "type": "string"
+            },
+            "batchId": {
+              "type": "string"
+            },
+            "blockId": {
+              "type": "string"
             }
           },
           "required": [
@@ -447,6 +453,7 @@
         "auth_failed",
         "provider_unavailable",
         "sdk_error",
+        "request_timeout",
         "subprocess_failure",
         "max_turns",
         "aborted",

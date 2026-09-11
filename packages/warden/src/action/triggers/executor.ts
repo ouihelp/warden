@@ -42,6 +42,7 @@ function toAnalysisChunkingConfig(
   if (chunking.filePatterns) {
     analysisChunking.filePatterns = chunking.filePatterns;
   }
+  if (chunking.grouping) analysisChunking.grouping = chunking.grouping;
   if (chunking.coalesce) {
     analysisChunking.coalesce = chunking.coalesce;
   }

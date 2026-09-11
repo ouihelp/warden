@@ -1,3 +1,4 @@
+import { blockId, type ReviewUnit } from './review-unit.js';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import type { SkillDefinition } from '../config/schema.js';
@@ -19,7 +20,7 @@ export type PRPromptContext = PromptPRContext;
  * (applicationType, trustBoundaries, filesChecked) to cache across hunks, allow
  * user overrides, or build analytics. Not implemented since we don't consume it yet.
  */
-export function buildHunkSystemPrompt(skill: SkillDefinition, historicalEvidence?: string): string {
+export function buildHunkSystemPrompt(skill: SkillDefinition, historicalEvidence?: string, batch = false): string {
   const sections = [
     `<role>
 You are a code analysis agent for Warden. You evaluate code changes against specific skill criteria and report findings ONLY when the code violates or conflicts with those criteria. You do not perform general code review or report issues outside the skill's scope.
@@ -30,7 +31,7 @@ Before reporting a finding:
 1. Read the relevant source code to understand the full context
 2. Trace through the code path — follow imports, base classes, and indirect references, not just the immediate file
 3. Verify your assumptions — confirm the issue exists, don't infer from incomplete information
-4. Ensure the finding references lines within the hunk being analyzed
+4. Ensure the finding references lines within ${batch ? 'a target block' : 'the hunk'} being analyzed
 5. Document the evidence trace in the 'verification' field of each finding
 </evidence>`,
 
@@ -66,15 +67,15 @@ Full schema:
 Requirements:
 - Return valid JSON starting with {"findings":
 - "findings" array can be empty if no issues found
-- "location.path" is auto-filled from context - just provide startLine (and optionally endLine). Omit location entirely for general findings not about a specific line.
-- "location.startLine" MUST be within the hunk line range (shown in the "## Hunk" header). If the issue originates in surrounding code, anchor to the nearest changed line in the hunk and note the actual location in the description.
+- ${batch ? '"location.path" is REQUIRED and must exactly match a target block path. Provide startLine and optionally endLine.' : '"location.path" is auto-filled from context - just provide startLine (and optionally endLine).'} Omit location entirely for general findings not about a specific line.
+- "location.startLine" MUST be within ${batch ? 'a target block' : 'the hunk'} line range (shown in the "## Hunk" header). If the issue originates in surrounding code, anchor to the nearest changed line in the hunk and note the actual location in the description.
 - "confidence" reflects how certain you are this is a real issue given the codebase context
 - "description" is rendered directly in GitHub inline comments. Keep it brief and actionable, usually one sentence.
 - Put the concrete evidence trace in "verification", not "description".
 - Write "verification" as evidence, not reasoning: facts from the code path, guards, conditions, and observed behavior that make the finding believable.
 - Do not format "verification" as any labeled checklist or template.
 - Do not include severity, confidence, finding ID, skill name, or generic review framing in "description".
-- Focus your analysis on the code changes in the hunk. Surrounding context and tool results are for understanding only -- all findings must reference lines within the hunk range.
+- Focus your analysis on the code changes in ${batch ? 'the target blocks' : 'the hunk'}. Surrounding context and tool results are for understanding only -- all findings must reference lines within the hunk range.
 `),
   ];
 
@@ -94,7 +95,13 @@ You can read files from ${dirList} subdirectories using the Read tool with the f
     }
   }
 
-  return sections.join('\n\n');
+  const prompt = sections.join('\n\n');
+  if (!batch) return prompt;
+  return prompt
+    + '\n\nReview EVERY target block, including their interactions. Read repository files as needed. '
+    + 'Context-only definitions are not targets. Findings must be anchored in a target block. '
+    + 'Add "reviewedBlocks": ["block-id", ...] after "findings" in the output JSON. '
+    + 'List only target block IDs you actually reviewed. Never claim an unfinished block.';
 }
 
 /**
@@ -115,5 +122,17 @@ Analyze this code change according to the "${skill.name}" skill criteria.
     `<scope_reminder>
 Only report findings that are explicitly covered by the skill instructions. Do not report general code quality issues, bugs, or improvements unless the skill specifically asks for them. Return an empty findings array if no issues match the skill's criteria.
 </scope_reminder>`,
+  ]);
+}
+
+/** Stable PR prefix followed by bounded target blocks and related definitions. */
+export function buildBatchUserPrompt(skill: SkillDefinition, batch: ReviewUnit, prContext?: PRPromptContext): string {
+  const stableContext = prContext ? { ...prContext, changedFiles: [...prContext.changedFiles].sort() } : undefined;
+  return joinPromptSections([
+    `<task>Analyze all target blocks according to the "${skill.name}" skill criteria.</task>`,
+    buildPullRequestContextSection(stableContext),
+    buildChangedFilesSection(stableContext, ''),
+    ...batch.members.map((hunk) => `<target_block id="${blockId(hunk)}">\n${formatHunkForAnalysis(hunk)}\n</target_block>`),
+    ...batch.references.map((hunk) => `<context_only>\n${formatHunkForAnalysis(hunk)}\n</context_only>`),
   ]);
 }
