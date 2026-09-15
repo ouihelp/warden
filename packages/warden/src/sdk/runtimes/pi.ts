@@ -74,6 +74,8 @@ const UNSUPPORTED_TOOLS: ToolName[] = ['WebFetch', 'WebSearch'];
 const DEFAULT_PI_PROVIDER_MAX_RETRIES = 2;
 const PI_SKILL_PROVIDER_MAX_RETRIES = 0;
 const PI_MODEL_REFRESH_TIMEOUT_MS = 15_000;
+/** Bound one repo-aware agent session so stalled provider calls cannot consume the whole workflow budget. */
+const PI_SKILL_TIMEOUT_MS = 10 * 60 * 1000;
 /**
  * Share one network catalog refresh per provider across concurrent Pi prompts.
  * Waiters can stop waiting via their own abort signal without cancelling shared
@@ -1089,6 +1091,7 @@ export const piRuntime: Runtime = {
             maxTurns,
             effort,
             maxRetries: PI_SKILL_PROVIDER_MAX_RETRIES,
+            timeout: PI_SKILL_TIMEOUT_MS,
             abortController,
             parentSpan: span,
             traceRecorder: request.traceRecorder,

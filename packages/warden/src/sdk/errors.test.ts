@@ -138,6 +138,10 @@ describe('classifyError', () => {
     expect(classifyError(new Error('Claude Code process exited with code 1')).code).toBe('provider_unavailable');
   });
 
+  it('tags a stalled Pi session timeout as provider_unavailable', () => {
+    expect(classifyError(new Error('Pi runtime timed out after 600000ms')).code).toBe('provider_unavailable');
+  });
+
   it('tags AbortError as aborted', () => {
     const err = new Error('The operation was aborted');
     err.name = 'AbortError';

@@ -1671,6 +1671,29 @@ describe('runPRWorkflow', () => {
       expect(analysisQueue).toBeInstanceOf(AsyncWorkQueue);
     });
 
+    it('exports partial usage when every trigger fails', async () => {
+      const report = createSkillReport({
+        skill: 'test-skill',
+        usage: { inputTokens: 120, outputTokens: 30, costUSD: 0.42 },
+        error: {
+          code: 'provider_unavailable',
+          message: 'Provider unavailable after 5 consecutive failures.',
+        },
+      });
+      mockRunSkillTask.mockResolvedValue({
+        name: 'test-trigger',
+        report,
+        error: new Error(report.error!.message),
+      });
+
+      await expect(
+        runPRWorkflow(mockOctokit, createDefaultInputs(), 'pull_request', EVENT_PAYLOAD_PATH, FIXTURES_DIR)
+      ).rejects.toThrow(/All 1 trigger\(s\) failed/);
+
+      const [reports] = mockWriteFindingsOutput.mock.calls.at(-1)!;
+      expect(reports).toEqual([report]);
+    });
+
     it('writes a live snapshot after the trigger completes, carrying skillExecutionId and skippedTriggers', async () => {
       mockRunSkillTask.mockResolvedValue({ name: 'test-trigger', report: createSkillReport({ skill: 'test-skill' }) });
 
