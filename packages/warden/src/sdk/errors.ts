@@ -150,6 +150,7 @@ function isProviderUnavailableError(error: unknown): boolean {
 
   const message = error instanceof Error ? error.message : String(error);
   return (
+    /\b(timed? out|timeout|ETIMEDOUT)\b/i.test(message) ||
     /Claude Code process exited with code \d+/i.test(message) ||
     /Claude Code stderr:[\s\S]*\b(overloaded|rate limit|timed? out|timeout|ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT)\b/i.test(message)
   );

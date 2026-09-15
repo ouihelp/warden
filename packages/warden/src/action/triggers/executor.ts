@@ -191,6 +191,7 @@ export async function executeTrigger(
       const requestChanges = trigger.requestChanges ?? deps.globalRequestChanges;
       const failCheck = trigger.failCheck ?? deps.globalFailCheck;
       const skillRoot = trigger.useBuiltinSkill ? undefined : (trigger.skillRoot ?? context.repoPath);
+      let partialReport: SkillReport | undefined;
 
       try {
         assertValidPiModelSelectors([trigger]);
@@ -239,6 +240,7 @@ export async function executeTrigger(
         };
         const result = await runSkillTask(taskOptions, callbacks, deps.analysisQueue);
         const report = result.report;
+        partialReport = report;
 
         if (!report) {
           throw result.error ?? new Error('Skill task returned no report');
@@ -332,6 +334,7 @@ export async function executeTrigger(
           skillExecutionId: trigger.skillExecutionId,
           triggerName: trigger.name,
           skillName: trigger.skill,
+          report: partialReport,
           error,
         };
       }

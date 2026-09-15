@@ -393,6 +393,7 @@ describe('executeTrigger', () => {
       skill: 'test-skill',
       summary: 'test-skill: failed (all_hunks_failed)',
       findings: [],
+      usage: { inputTokens: 100, outputTokens: 50, costUSD: 0.01 },
       error: { code: 'all_hunks_failed' as const, message: 'All 2 chunks failed to analyze.' },
     };
     vi.mocked(runSkillTask).mockResolvedValue({
@@ -406,7 +407,8 @@ describe('executeTrigger', () => {
     const result = await executeTrigger(mockTrigger, mockDeps);
 
     expect(result.error).toBeDefined();
-    expect(result.report).toBeUndefined();
+    expect(result.report).toBe(failedReport);
+    expect(result.report?.usage).toEqual({ inputTokens: 100, outputTokens: 50, costUSD: 0.01 });
     expect(failSkillCheck).toHaveBeenCalled();
   });
 
