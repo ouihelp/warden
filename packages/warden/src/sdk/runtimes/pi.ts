@@ -76,6 +76,8 @@ const PI_SKILL_PROVIDER_MAX_RETRIES = 0;
 const PI_MODEL_REFRESH_TIMEOUT_MS = 15_000;
 /** Bound one repo-aware agent session so stalled provider calls cannot consume the whole workflow budget. */
 const PI_SKILL_TIMEOUT_MS = 10 * 60 * 1000;
+const FINAL_TURN_INSTRUCTION =
+  'The next turn is your final answer. Do not call tools. Return the requested review output now using only the evidence already collected.';
 /**
  * Share one network catalog refresh per provider across concurrent Pi prompts.
  * Waiters can stop waiting via their own abort signal without cancelling shared
@@ -602,7 +604,10 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
   let modelCallIndex = 0;
   let physicalCallSpans = 0;
   let openModelErrorType = 'incomplete_response';
-  const conversationMessages: GenAiMessage[] = [{ role: 'user', content: options.userPrompt }];
+  const initialPrompt = options.maxTurns === 1
+    ? `${options.userPrompt}\n\n${FINAL_TURN_INSTRUCTION}`
+    : options.userPrompt;
+  const conversationMessages: GenAiMessage[] = [{ role: 'user', content: initialPrompt }];
   // Pi uses cwd for path resolution but does not treat it as a filesystem boundary.
   // Same-name custom tools override its built-ins, so file access stays in the checkout.
   const customTools = options.customTools ?? [];
@@ -817,6 +822,18 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
         numTurns++;
         if (
           options.maxTurns !== undefined
+          && numTurns === options.maxTurns - 1
+          && isAssistantMessage(event.message)
+          && event.message.stopReason === 'toolUse'
+        ) {
+          session?.setActiveToolsByName([]);
+          conversationMessages.push({ role: 'user', content: FINAL_TURN_INSTRUCTION });
+          void session?.steer(FINAL_TURN_INSTRUCTION).catch((error: unknown) => {
+            warnings.push(`Failed to request a tool-free final answer: ${errorMessage(error)}`);
+          });
+        }
+        if (
+          options.maxTurns !== undefined
           && numTurns >= options.maxTurns
           && isAssistantMessage(event.message)
           && event.message.stopReason === 'toolUse'
@@ -838,7 +855,10 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
       if (abortSignal?.aborted) {
         await session.abort();
       } else {
-        await promptWithTimeout(session, options.userPrompt, options.timeout);
+        if (options.maxTurns === 1) {
+          session.setActiveToolsByName([]);
+        }
+        await promptWithTimeout(session, initialPrompt, options.timeout);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

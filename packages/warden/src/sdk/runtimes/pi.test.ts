@@ -45,6 +45,8 @@ const piMocks = vi.hoisted(() => {
       return vi.fn();
     }),
     prompt: vi.fn(),
+    steer: vi.fn(async () => undefined),
+    setActiveToolsByName: vi.fn(),
     abort: vi.fn(async () => undefined),
     dispose: vi.fn(),
   };
@@ -488,6 +490,40 @@ describe('piRuntime.runSkill', () => {
       },
     });
 
+    expect(piMocks.session.abort).not.toHaveBeenCalled();
+    expect(result.result?.status).toBe('success');
+  });
+
+  it('reserves the final turn for a tool-free answer', async () => {
+    const toolUseMessage = assistantMessage({
+      stopReason: 'toolUse',
+      content: [{ type: 'toolCall', id: 'tool-1', name: 'read', arguments: { path: 'README.md' } }],
+    });
+    const finalMessage = assistantMessage({
+      content: [{ type: 'text', text: '{"findings":[]}' }],
+    });
+    piMocks.session.prompt.mockImplementation(async () => {
+      const listener = piMocks.listeners[0];
+      if (!listener) {
+        throw new Error('Pi session listener was not registered');
+      }
+      listener({ type: 'message_end', message: toolUseMessage });
+      listener({ type: 'turn_end', message: toolUseMessage, toolResults: [] });
+      listener({ type: 'message_end', message: finalMessage });
+      listener({ type: 'turn_end', message: finalMessage, toolResults: [] });
+      listener({ type: 'agent_end', messages: [toolUseMessage, finalMessage] });
+    });
+
+    const result = await piRuntime.runSkill({
+      ...baseSkillRequest(),
+      options: {
+        model: 'openai/gpt-test',
+        maxTurns: 2,
+      },
+    });
+
+    expect(piMocks.session.setActiveToolsByName).toHaveBeenCalledWith([]);
+    expect(piMocks.session.steer).toHaveBeenCalledWith(expect.stringContaining('final answer'));
     expect(piMocks.session.abort).not.toHaveBeenCalled();
     expect(result.result?.status).toBe('success');
   });
