@@ -6,6 +6,7 @@ import {
   aggregateSeverityCounts,
   createCoreCheck,
   updateCoreCheck,
+  updateSkillCheck,
   failSkillCheck,
   createFailedSkillCheck,
 } from './github-checks.js';
@@ -51,6 +52,45 @@ describe('check details URL', () => {
       'Failed to set details URL for check 123: Error: Bad credentials'
     );
     warn.mockRestore();
+  });
+});
+
+describe('updateSkillCheck', () => {
+  it('marks a partially analyzed skill as incomplete instead of clean', async () => {
+    const update = vi.fn().mockResolvedValue({ data: {} });
+    const report: SkillReport = {
+      skill: 'correctness',
+      summary: 'correctness: No issues found',
+      findings: [],
+      failedHunks: 1,
+      durationMs: 1000,
+      hunkFailures: [{
+        type: 'analysis',
+        filename: 'src/slow.ts',
+        lineRange: '10-20',
+        code: 'max_turns',
+        message: 'Runtime error: turn_limit',
+      }],
+    };
+
+    await updateSkillCheck(
+      { checks: { update } } as never,
+      123,
+      report,
+      { owner: 'getsentry', repo: 'warden', headSha: 'abc123' },
+    );
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      conclusion: 'neutral',
+      output: expect.objectContaining({
+        title: 'Analysis incomplete',
+        summary: expect.stringContaining('1 chunk failed to analyze'),
+      }),
+    }));
+    expect(update.mock.calls[0]![0].output.summary).not.toContain('No issues found');
+    expect(update.mock.calls[0]![0].output.summary).toContain(
+      'No findings were reported by the completed chunks.\n\n---'
+    );
   });
 });
 
@@ -545,6 +585,37 @@ describe('aggregateSeverityCounts', () => {
 });
 
 describe('updateCoreCheck', () => {
+  it('marks the overall check incomplete when any skill was partial', async () => {
+    const update = vi.fn().mockResolvedValue({ data: {} });
+
+    await updateCoreCheck(
+      { checks: { update } } as never,
+      123,
+      {
+        totalSkills: 1,
+        totalFindings: 0,
+        findingsBySeverity: { high: 0, medium: 0, low: 0 },
+        findings: [],
+        skillResults: [{
+          name: 'correctness',
+          findingCount: 0,
+          conclusion: 'success',
+          incomplete: true,
+        }],
+      },
+      'success',
+      { owner: 'getsentry', repo: 'warden' },
+    );
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      conclusion: 'neutral',
+      output: expect.objectContaining({
+        title: 'Analysis incomplete',
+        summary: expect.stringContaining('Some changed code was not analyzed.'),
+      }),
+    }));
+  });
+
   it('renders total skill cost including auxiliary usage', async () => {
     const update = vi.fn().mockResolvedValue({ data: {} });
     const octokit = { checks: { update } } as unknown as Parameters<typeof updateCoreCheck>[0];

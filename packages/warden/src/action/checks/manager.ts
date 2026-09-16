@@ -89,6 +89,7 @@ export function buildCoreSummaryData(
     name: string;
     findingCount: number;
     conclusion: 'success' | 'failure' | 'neutral' | 'cancelled';
+    incomplete?: boolean;
     durationMs?: number;
     usage?: UsageStats;
     auxiliaryUsage?: AuxiliaryUsageMap;
@@ -118,6 +119,9 @@ export function buildCoreSummaryData(
       conclusion: r.report
         ? determineConclusion(r.report.findings, r.failOn, r.failCheck)
         : ('failure' as const),
+      incomplete: r.report
+        ? (r.report.failedHunks ?? 0) > 0 || (r.report.failedExtractions ?? 0) > 0
+        : undefined,
       durationMs: r.report?.durationMs,
       usage: r.report?.usage,
       auxiliaryUsage: r.report?.auxiliaryUsage,

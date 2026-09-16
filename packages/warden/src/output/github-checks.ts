@@ -77,6 +77,7 @@ export interface CoreCheckSummaryData {
     name: string;
     findingCount: number;
     conclusion: CheckConclusion;
+    incomplete?: boolean;
     durationMs?: number;
     usage?: UsageStats;
     auxiliaryUsage?: AuxiliaryUsageMap;
@@ -258,15 +259,19 @@ function buildSkillCheckPayload(
 } {
   // Conclusion is based on confidence-filtered findings (consistent with CLI path)
   const filteredForConclusion = filterFindings(report.findings, undefined, options.minConfidence);
-  const conclusion =
+  const findingsConclusion =
     options.conclusion ?? determineConclusion(filteredForConclusion, options.failOn, options.failCheck);
+  const incomplete = reportIsIncomplete(report);
+  const conclusion = incomplete && findingsConclusion === 'success' ? 'neutral' : findingsConclusion;
   // Annotations are filtered by reportOn threshold and confidence
   const annotations = findingsToAnnotations(report.findings, options.reportOn, options.minConfidence);
 
   const summary = buildSkillSummary(report);
 
   const filteredCount = filteredForConclusion.length;
-  const title = options.title ?? (filteredCount === 0
+  const title = options.title ?? (incomplete
+    ? 'Analysis incomplete'
+    : filteredCount === 0
     ? 'No issues'
     : `${filteredCount} issue${filteredCount === 1 ? '' : 's'}`);
 
@@ -470,11 +475,15 @@ export async function createCompletedCoreCheck(
 ): Promise<CreateCheckResult> {
   const summary = buildCoreSummary(summaryData);
 
+  const incomplete = coreAnalysisIsIncomplete(summaryData);
   const title = summaryData.title ?? (
-    summaryData.totalFindings === 0
+    incomplete
+      ? 'Analysis incomplete'
+      : summaryData.totalFindings === 0
       ? 'No issues'
       : `${summaryData.totalFindings} issue${summaryData.totalFindings === 1 ? '' : 's'}`
   );
+  const effectiveConclusion = incomplete && conclusion === 'success' ? 'neutral' : conclusion;
 
   const { data } = await octokit.checks.create({
     owner: options.owner,
@@ -482,7 +491,7 @@ export async function createCompletedCoreCheck(
     name: 'warden',
     head_sha: options.headSha,
     status: 'completed',
-    conclusion,
+    conclusion: effectiveConclusion,
     completed_at: new Date().toISOString(),
     output: {
       title,
@@ -509,18 +518,22 @@ export async function updateCoreCheck(
 ): Promise<void> {
   const summary = buildCoreSummary(summaryData);
 
+  const incomplete = coreAnalysisIsIncomplete(summaryData);
   const title = summaryData.title ?? (
-    summaryData.totalFindings === 0
+    incomplete
+      ? 'Analysis incomplete'
+      : summaryData.totalFindings === 0
       ? 'No issues'
       : `${summaryData.totalFindings} issue${summaryData.totalFindings === 1 ? '' : 's'}`
   );
+  const effectiveConclusion = incomplete && conclusion === 'success' ? 'neutral' : conclusion;
 
   await octokit.checks.update({
     owner: options.owner,
     repo: options.repo,
     check_run_id: checkRunId,
     status: 'completed',
-    conclusion,
+    conclusion: effectiveConclusion,
     completed_at: new Date().toISOString(),
     output: {
       title,
@@ -605,10 +618,28 @@ function renderStatsFooter(
  * Build the summary markdown for a skill check.
  */
 function buildSkillSummary(report: SkillReport): string {
-  const lines: string[] = [escapeHtml(report.summary), ''];
+  const incomplete = reportIsIncomplete(report);
+  const lines: string[] = [incomplete ? 'Analysis incomplete.' : escapeHtml(report.summary), ''];
+  const incompleteReasons: string[] = [];
+  if (report.failedHunks) {
+    incompleteReasons.push(
+      `${report.failedHunks} chunk${report.failedHunks === 1 ? '' : 's'} failed to analyze`
+    );
+  }
+  if (report.failedExtractions) {
+    incompleteReasons.push(
+      `${report.failedExtractions} finding extraction${report.failedExtractions === 1 ? '' : 's'} failed`
+    );
+  }
+  if (incompleteReasons.length > 0) {
+    lines.push(`⚠️ Analysis incomplete: ${incompleteReasons.join('; ')}.`, '');
+  }
 
   if (report.findings.length === 0) {
-    lines.push('No issues found.');
+    lines.push(
+      incomplete ? 'No findings were reported by the completed chunks.' : 'No issues found.',
+      ''
+    );
   } else {
     const sortedFindings = [...report.findings].sort(
       (a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity]
@@ -644,7 +675,14 @@ function buildCoreSummary(data: CoreCheckSummaryData): string {
       lines.push(`*...and ${remaining} more*`, '');
     }
   } else {
-    lines.push(data.message ? escapeHtml(data.message) : 'No issues found.', '');
+    lines.push(
+      data.message
+        ? escapeHtml(data.message)
+        : coreAnalysisIsIncomplete(data)
+          ? 'Analysis incomplete. Some changed code was not analyzed.'
+          : 'No issues found.',
+      ''
+    );
   }
 
   // Skills table in collapsible section
@@ -680,6 +718,14 @@ function buildCoreSummary(data: CoreCheckSummaryData): string {
   lines.push(...renderStatsFooter(data.totalDurationMs, data.totalUsage, data.totalAuxiliaryUsage));
 
   return lines.join('\n');
+}
+
+function reportIsIncomplete(report: SkillReport): boolean {
+  return (report.failedHunks ?? 0) > 0 || (report.failedExtractions ?? 0) > 0;
+}
+
+function coreAnalysisIsIncomplete(data: CoreCheckSummaryData): boolean {
+  return data.skillResults.some((skill) => skill.incomplete === true);
 }
 
 /**

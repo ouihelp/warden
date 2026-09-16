@@ -104,6 +104,7 @@ describe('findings output schema', () => {
           usage: undefined,
           failedHunks: undefined,
           failedExtractions: undefined,
+          hunkFailures: undefined,
           error: undefined,
           skillExecutionId: undefined,
           triggerId: undefined,
@@ -207,6 +208,13 @@ describe('findings output schema', () => {
       runtime: 'pi',
       auxiliaryUsageAttribution: { verification: { model: 'verifier', runtime: 'claude' } },
       failedHunks: 1,
+      hunkFailures: [{
+        type: 'analysis',
+        filename: 'src/slow.ts',
+        lineRange: '10-20',
+        code: 'max_turns',
+        message: 'Runtime error: turn_limit',
+      }],
     });
     const output = buildFindingsOutput([report], createContext(), [], {
       timestamp: '2026-01-01T00:00:00.000Z',
@@ -340,6 +348,13 @@ describe('findings output schema', () => {
     const report = createReport({
       failedHunks: 2,
       failedExtractions: 1,
+      hunkFailures: [{
+        type: 'analysis',
+        filename: 'src/slow.ts',
+        lineRange: '10-20',
+        code: 'max_turns',
+        message: 'Runtime error: turn_limit',
+      }],
       error: { code: 'sdk_error', message: 'boom' },
     });
     const output = buildFindingsOutput([report], createContext(), [], {
@@ -351,6 +366,13 @@ describe('findings output schema', () => {
     expect(output.skills[0]).toMatchObject({
       failedHunks: 2,
       failedExtractions: 1,
+      hunkFailures: [{
+        type: 'analysis',
+        filename: 'src/slow.ts',
+        lineRange: '10-20',
+        code: 'max_turns',
+        message: 'Runtime error: turn_limit',
+      }],
       error: { code: 'sdk_error', message: 'boom' },
     });
   });
@@ -363,11 +385,13 @@ describe('findings output schema', () => {
 
     expect(output.skills[0]?.failedHunks).toBeUndefined();
     expect(output.skills[0]?.failedExtractions).toBeUndefined();
+    expect(output.skills[0]?.hunkFailures).toBeUndefined();
     expect(output.skills[0]?.error).toBeUndefined();
 
     const serialized = JSON.parse(JSON.stringify(output.skills[0]));
     expect('failedHunks' in serialized).toBe(false);
     expect('failedExtractions' in serialized).toBe(false);
+    expect('hunkFailures' in serialized).toBe(false);
     expect('error' in serialized).toBe(false);
   });
 

@@ -5,6 +5,7 @@ import {
   AuxiliaryUsageMapSchema,
   FindingSchema,
   GitHubEventTypeSchema,
+  HunkFailureSchema,
   LocationSchema,
   SeverityThresholdSchema,
   SkillErrorSchema,
@@ -204,6 +205,7 @@ export const FindingsOutputSchema = z.object({
     usage: UsageStatsSchema.optional(),
     failedHunks: z.number().int().nonnegative().optional(),
     failedExtractions: z.number().int().nonnegative().optional(),
+    hunkFailures: z.array(HunkFailureSchema).optional(),
     error: SkillErrorSchema.optional(),
     verifierRejections: VerifierRejectionsSchema.optional(),
     /** Stable id for this skill×trigger execution. */
@@ -493,6 +495,7 @@ export function buildFindingsOutput(
         usage: r.usage,
         failedHunks: r.failedHunks,
         failedExtractions: r.failedExtractions,
+        hunkFailures: r.hunkFailures,
         error: r.error,
         verifierRejections: r.verifierRejections,
         skillExecutionId: meta?.skillExecutionId,
