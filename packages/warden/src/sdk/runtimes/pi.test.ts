@@ -39,6 +39,7 @@ const piMocks = vi.hoisted(() => {
     getModels: vi.fn(() => [model]),
   };
   const session = {
+    agent: { streamFunction: vi.fn() },
     sessionId: 'pi-session-1',
     subscribe: vi.fn((listener: (event: unknown) => void) => {
       piMocks.listeners.push(listener);
@@ -181,6 +182,7 @@ describe('piRuntime.runSkill', () => {
     piMocks.listeners = [];
     piMocks.resourceLoaderOptions = [];
     piMocks.customTools = [];
+    piMocks.session.agent.streamFunction = vi.fn();
     piMocks.session.prompt.mockImplementation(async () => emitSuccessfulRun());
     piMocks.modelRuntime.getModel.mockReturnValue(piMocks.model);
     piMocks.modelRuntime.getModels.mockReturnValue([piMocks.model]);
@@ -192,6 +194,39 @@ describe('piRuntime.runSkill', () => {
     expect(createAgentSession).toHaveBeenCalledWith(
       expect.objectContaining({ model: piMocks.model })
     );
+  });
+
+  it('keeps the overall session deadline even while provider recovery is enabled', async () => {
+    vi.useFakeTimers();
+    piMocks.session.prompt.mockImplementation(() => new Promise(() => { /* Hung session. */ }));
+    try {
+      const run = piRuntime.runSkill(baseSkillRequest());
+      const rejected = expect(run).rejects.toThrow('Pi runtime timed out after 600000ms');
+      await vi.advanceTimersByTimeAsync(600_000);
+      await rejected;
+      expect(piMocks.session.abort).toHaveBeenCalledTimes(1);
+      expect(piMocks.session.prompt).toHaveBeenCalledTimes(1);
+      expect(piMocks.session.dispose).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('records model retries without spending the tool-turn budget', async () => {
+    piMocks.session.prompt.mockImplementation(async () => {
+      const listener = piMocks.listeners[0]!;
+      const errorMessage = 'Provider stream idle timeout after 90000ms';
+      const failed = assistantMessage({ stopReason: 'error', errorMessage });
+      listener({ type: 'turn_start' });
+      listener({ type: 'message_end', message: failed });
+      listener({ type: 'turn_end', message: failed, toolResults: [] });
+      listener({ type: 'auto_retry_start', attempt: 1, maxAttempts: 1, errorMessage });
+      emitSuccessfulRun();
+    });
+    const response = await piRuntime.runSkill(baseSkillRequest());
+    expect(response.result).toMatchObject({ status: 'success', numTurns: 1 });
+    expect(response.stderr).toContain('Retrying Pi model call (1/1)');
+    expect(piMocks.session.abort).not.toHaveBeenCalled();
   });
 
   it('applies WARDEN_<PROVIDER>_BASE_URL to the resolved model', async () => {
@@ -312,9 +347,10 @@ describe('piRuntime.runSkill', () => {
       compaction: { enabled: false },
       retry: expect.objectContaining({
         enabled: true,
+        maxRetries: 1,
         provider: expect.objectContaining({
           maxRetries: 0,
-          timeoutMs: 10 * 60 * 1000,
+          timeoutMs: 90_000,
         }),
       }),
     }));

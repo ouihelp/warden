@@ -54,6 +54,7 @@ import { aggregateUsage, emptyUsage } from '../usage.js';
 import { InvalidPiModelSelectorError, isPiModelSelector } from './model-selectors.js';
 import { isWardenOffline } from '../offline.js';
 import { createCheckoutFileTools } from './pi-file-tools.js';
+import { withStreamIdleTimeout } from './pi-stream.js';
 import type {
   AuxiliaryRunRequest,
   AuxiliaryRunResult,
@@ -73,6 +74,7 @@ const MUTATING_TOOLS: ToolName[] = ['Write', 'Edit', 'Bash'];
 const UNSUPPORTED_TOOLS: ToolName[] = ['WebFetch', 'WebSearch'];
 const DEFAULT_PI_PROVIDER_MAX_RETRIES = 2;
 const PI_SKILL_PROVIDER_MAX_RETRIES = 0;
+const PI_SKILL_STREAM_IDLE_TIMEOUT_MS = 90_000;
 const PI_MODEL_REFRESH_TIMEOUT_MS = 15_000;
 /** Bound one repo-aware agent session so stalled provider calls cannot consume the whole workflow budget. */
 const PI_SKILL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -129,6 +131,8 @@ interface PiPromptOptions {
   effort?: Effort;
   maxRetries?: number;
   timeout?: number;
+  streamIdleTimeoutMs?: number;
+  maxAgentRetries?: number;
   abortController?: AbortController;
   toolDescriptions?: Record<string, string>;
   /** Parent `invoke_agent` span for model-call and tool-execution child spans. */
@@ -509,13 +513,14 @@ function normalizePiResult(run: PiPromptResult): SkillRunResult | undefined {
   };
 }
 
-function buildSettingsManager(timeout: number | undefined, maxRetries: number | undefined): SettingsManager {
+function buildSettingsManager(timeout: number | undefined, maxRetries: number | undefined, maxAgentRetries?: number): SettingsManager {
   const providerMaxRetries = maxRetries ?? DEFAULT_PI_PROVIDER_MAX_RETRIES;
   return SettingsManager.inMemory({
     compaction: { enabled: false },
     retry: {
       // Provider retries are independent from Pi's agent-level transient retry loop.
       enabled: true,
+      ...(maxAgentRetries !== undefined ? { maxRetries: maxAgentRetries } : {}),
       provider: {
         ...(timeout !== undefined ? { timeoutMs: timeout } : {}),
         maxRetries: providerMaxRetries,
@@ -577,7 +582,9 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
     options.abortController?.signal,
   );
   const model = resolvePiModel(options.model, modelRuntime);
-  const settingsManager = buildSettingsManager(options.timeout, options.maxRetries);
+  const settingsManager = buildSettingsManager(
+    options.streamIdleTimeoutMs ?? options.timeout, options.maxRetries, options.maxAgentRetries,
+  );
   const agentDir = getAgentDir();
   const resourceLoader = new DefaultResourceLoader({
     cwd: options.cwd,
@@ -787,6 +794,14 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
       settingsManager,
     });
     session = result.session;
+    if (options.streamIdleTimeoutMs !== undefined) {
+      let idleTimeouts = 0;
+      session.agent.streamFunction = withStreamIdleTimeout(session.agent.streamFunction, options.streamIdleTimeoutMs, () => {
+        idleTimeouts++;
+        options.parentSpan?.setAttribute('warden.stream.idle_timeout_count', idleTimeouts);
+        warnings.push(`Provider stream idle timeout after ${options.streamIdleTimeoutMs}ms`);
+      });
+    }
     if (result.modelFallbackMessage) {
       warnings.push(result.modelFallbackMessage);
     }
@@ -807,6 +822,12 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
         lastAssistant = event.message;
       } else if (event.type === 'agent_end') {
         agentEndMessages = [...event.messages];
+      } else if (event.type === 'auto_retry_start') {
+        Sentry.addBreadcrumb({
+          category: 'retry', level: 'warning', message: 'Retrying Pi model call',
+          data: { attempt: event.attempt, maxAttempts: event.maxAttempts, error: sanitizeErrorMessage(event.errorMessage) },
+        });
+        warnings.push(`Retrying Pi model call (${event.attempt}/${event.maxAttempts}): ${sanitizeErrorMessage(event.errorMessage)}`);
       } else if (event.type === 'tool_execution_start') {
         startToolSpan(event);
       } else if (event.type === 'tool_execution_end') {
@@ -819,7 +840,9 @@ async function runPiPrompt(options: PiPromptOptions): Promise<PiPromptResult> {
             finishReason: event.message.stopReason,
           }, ...(event.toolResults ?? []));
         }
-        numTurns++;
+        if (isAssistantMessage(event.message) && event.message.stopReason !== 'error' && event.message.stopReason !== 'aborted') {
+          numTurns++;
+        }
         if (
           options.maxTurns !== undefined
           && numTurns === options.maxTurns - 1
@@ -1112,6 +1135,8 @@ export const piRuntime: Runtime = {
             effort,
             maxRetries: PI_SKILL_PROVIDER_MAX_RETRIES,
             timeout: PI_SKILL_TIMEOUT_MS,
+            streamIdleTimeoutMs: PI_SKILL_STREAM_IDLE_TIMEOUT_MS,
+            maxAgentRetries: 1,
             abortController,
             parentSpan: span,
             traceRecorder: request.traceRecorder,
